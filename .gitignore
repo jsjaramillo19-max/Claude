@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+
+# Generated output: daily HTML/JSON reports and run state
+job_reports/
