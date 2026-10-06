@@ -2606,6 +2606,8 @@ def scrape_ashby_boards() -> list[dict]:
 # Titles and short previews are not enough: many "Assistant" or "Junior" posts require 2+ years.
 
 TAX_TITLE = re.compile(r"\btax(ation)?\b|\b1040\b", re.I)
+# US tax roles (the user's stated goal). A tax title plus a US signal; 1040/1065/1120/990 and IRS are US-only forms.
+US_TAX_SIGNAL = re.compile(r"\bu\.?s\.?\b|\bunited states\b|\bamerican\b|\birs\b|\b(?:form\s*)?(?:1040|1065|1120(?:-?s)?|990)\b", re.I)
 NOT_TAX_JOB_TITLE = re.compile(r"executive (administrative )?assistant|\blaw\b|attorney|lawyer|immigration|strategist|advisor|planning", re.I)
 LEGAL_TITLE = re.compile(
     r"paralegal|\blegal\b|law clerk|litigation|contracts? (review|reviewer|specialist|analyst|coordinator)|compliance"
@@ -2619,8 +2621,14 @@ SUPPORT_TITLE = {
     "tax": re.compile(r"assistant|clerk|data entry|documentation|coordinator|support|\bva\b|trainee|junior|associate|staff", re.I),
     "legal": re.compile(r"legal assistant|legal secretary|legal (va|virtual)|virtual assistant|intake|clerk|document|records|admin|trainee|junior", re.I),
     "analyst": None,  # analyst roles must say they are entry-level; silence proves nothing
+    "bookkeeping": None,  # a plain "Bookkeeper" proves nothing; needs an explicit entry signal in the posting
 }
-ENTRY_CATEGORY_LABEL = {"tax": "Tax", "legal": "Legal & compliance", "analyst": "Analyst"}
+ENTRY_CATEGORY_LABEL = {"tax": "Tax", "legal": "Legal & compliance", "analyst": "Analyst",
+                        "bookkeeping": "Bookkeeping & accounting"}
+# Bookkeeping/accounting titles that are worth checking for genuine entry-level framing (no senior titles — those are
+# screened out separately). The strict classifier still decides: it needs an explicit entry signal and no experience ask.
+BOOKKEEPING_ENTRY_TITLE = re.compile(
+    r"bookkeep\w*|account(?:s|ing|ant)?|accounts (payable|receivable)|\bap/ar\b|reconciliation|finance (assistant|clerk)", re.I)
 
 ENTRY_SIGNALS = [
     ("says entry-level", r"entry[- ]level"),
@@ -2644,23 +2652,27 @@ DOMAIN = {
     "tax": r"tax|taxation|1040|1065|1120|return preparation|returns?",
     "legal": r"legal|law\b|law firm|paralegal|litigation|contracts?|compliance|kyc|aml|immigration|court|conveyanc|personal injury|estate planning|case management|e-?discovery",
     "analyst": r"analy\w*|financial|finance|fp&a|modell?ing|data|sql|power bi|tableau|reporting|research|credit|risk|compliance|kyc|aml|audit|accounting",
+    "bookkeeping": r"bookkeep\w*|accounting|accounts|accountant|reconcil\w*|ledger|payroll|accounts payable|accounts receivable|ap/ar|quickbooks|xero|myob|month-end",
 }
 EXPERIENCED_TEAM = re.compile(r"experienced (team|professionals?|attorneys?|lawyers?|staff|seniors?|colleagues|mentors?|tax professional|accountants?|cpas?|analysts?|paralegals?)", re.I)
 
 
-def _prior_experience_required(line: str, category: str) -> bool:
+def _prior_experience_strength(line: str, category: str) -> str | None:
+    """"hard" = an explicit experience requirement; "soft" = unquantified familiarity with the domain
+    ("experience with reconciliations"), which a posting that also advertises itself as entry-level
+    (training provided, junior, 0-2 years) should be allowed to override; None = no experience ask."""
     dom = DOMAIN[category]
     if re.search(r"\b(prior|previous|proven|relevant|demonstrated|substantial)\s+(?:[\w.-]+\s+){0,4}experience\b", line):
-        return True
+        return "hard"
     if re.search(r"\bmust (have|possess)\b[^.]{0,40}\bexperience\b|\bexperience (is )?(required|a must|mandatory|essential)\b", line):
-        return True
+        return "hard"
     if re.search(r"\b(hands-on|solid|strong)\b.{0,45}\b(" + dom + r")\b.{0,30}\bexperience", line):
-        return True
+        return "hard"
     if re.search(r"\bexperience (?:in|with|preparing|doing|as|handling|working|supporting)\b.{0,35}\b(" + dom + r")\b", line):
-        return True
+        return "soft"
     if re.search(r"\bexperienced\b.{0,30}\b(" + dom + r")", line) and not EXPERIENCED_TEAM.search(line):
-        return True
-    return False
+        return "soft"
+    return None
 
 
 def _jobstreet_full_text(job_id: str) -> str:
@@ -2687,7 +2699,14 @@ def _onlinejobs_full_text(url: str) -> str:
         tag.decompose()
     text = soup.get_text("\n", strip=True)
     start = text.find("JOB OVERVIEW")
-    return text[start if start >= 0 else 0:][:10000]
+    text = text[start if start >= 0 else 0:]
+    # Trim trailing page furniture. The "Required Application Questions" block lists multiple-choice answer
+    # options like "3-5 years / 5+ years" that otherwise read as a fake experience requirement.
+    for marker in ["Required Application Questions", "SKILL REQUIREMENT", "VIEW OTHER JOBS", "Share This Post"]:
+        cut = text.find(marker)
+        if cut > 0:
+            text = text[:cut]
+    return text[:10000]
 
 
 def fetch_full_description(j: dict) -> str:
@@ -2750,6 +2769,10 @@ def classify_entry_level(title: str, full_text: str, category: str = "tax") -> t
         for label, pat in ENTRY_SIGNALS:
             if re.search(pat, low) and label not in entry_hits:
                 entry_hits.append(label)
+    # strong, explicit entry-level signals that let a role override a soft "experience with X" familiarity line
+    STRONG_ENTRY = {"says entry-level", "no experience required", "training provided",
+                    "0-2 years experience", "junior/trainee role", "fresh graduates welcome"}
+    has_strong = any(h in STRONG_ENTRY for h in entry_hits)
     for clause in _requirement_clauses(title, full_text):
         low = clause.lower()
         m = YEARS_REQ.search(low)
@@ -2758,7 +2781,8 @@ def classify_entry_level(title: str, full_text: str, category: str = "tax") -> t
                 and re.search(r"experience|\+\s*(years?|yrs?)|\b(years?|yrs?) (?:of|in|doing|with|working|as)\b", low) \
                 and not re.search(r"\b(since|founded|in business|serving)\b", low):
             return False, f"requires {m.group(1)}+ years: {clause.strip()[:90]}"
-        if _prior_experience_required(low, category):
+        strength = _prior_experience_strength(low, category)
+        if strength == "hard" or (strength == "soft" and not has_strong):
             return False, f"requires prior experience: {clause.strip()[:90]}"
     if entry_hits:
         return True, ", ".join(entry_hits)
@@ -2981,6 +3005,19 @@ def exclude_blocked_hours(jobs: list[dict]) -> list[dict]:
     return kept
 
 
+def mark_us_tax(jobs: list[dict]) -> None:
+    """Flag US tax roles (the user's goal). These survived the experience filter, so they don't demand the
+    2+ years of US tax experience the user lacks -- the ones actually worth applying to."""
+    for j in jobs:
+        title = j["title"]
+        if not (TAX_TITLE.search(title) and not NOT_TAX_JOB_TITLE.search(title)):
+            continue
+        text = f"{title} {get_full_text(j) or j.get('description', '')}"
+        if US_TAX_SIGNAL.search(text):
+            j["_us_tax"] = True
+    print(f"US tax roles: {sum(1 for j in jobs if j.get('_us_tax'))} jobs")
+
+
 def mark_high_pay(jobs: list[dict]) -> None:
     """Flag jobs whose stated pay can reach HIGH_PAY_MIN_USD a month (top of the range)."""
     for j in jobs:
@@ -3031,13 +3068,17 @@ def exclude_country_experience_required(jobs: list[dict]) -> list[dict]:
 
 
 def mark_entry_level(jobs: list[dict]) -> list[dict]:
-    """Flag genuine entry-level tax/legal/analyst jobs. Legal and analyst jobs that are not entry-level are dropped."""
-    kept, checked = [], {"tax": 0, "legal": 0, "analyst": 0}
+    """Flag genuine entry-level jobs. Legal and analyst jobs that are not entry-level are dropped; tax and
+    bookkeeping/accounting jobs are always kept (they just gain the _entry flag when the posting proves it)."""
+    kept, checked = [], {"tax": 0, "legal": 0, "analyst": 0, "bookkeeping": 0}
     for j in jobs:
         title = j["title"]
         cat = j.get("category")
         if cat is None and TAX_TITLE.search(title) and not NOT_TAX_JOB_TITLE.search(title):
             cat = "tax"
+        # Bookkeeping/accounting roles are the user's core target: check them for genuine entry-level framing too.
+        if cat is None and BOOKKEEPING_ENTRY_TITLE.search(title):
+            cat = "bookkeeping"
         if cat is None:
             kept.append(j)
             continue
@@ -3053,7 +3094,7 @@ def mark_entry_level(jobs: list[dict]) -> list[dict]:
                     j["_entry"], j["_entry_reason"], j["_entry_category"] = True, reason, cat
                 else:
                     j["_entry_reject"] = reason
-        if cat == "tax" or j.get("_entry"):
+        if cat in ("tax", "bookkeeping") or j.get("_entry"):
             kept.append(j)
     found = {c: sum(1 for j in kept if j.get("_entry_category") == c) for c in checked}
     print("True entry-level: " + ", ".join(f"{ENTRY_CATEGORY_LABEL[c]} {found[c]}/{checked[c]}" for c in checked))
@@ -3177,12 +3218,14 @@ def _is_flex_or_pt(j: dict) -> bool:
 
 
 def sort_jobs(jobs: list[dict]) -> list[dict]:
+    """Highest chance of getting accepted first (the Fit % column), then flexible/part-time, then freshest."""
     def sort_key(j):
+        prob = j.get("_prob", 40)
         flex = 1 if _is_flex_or_pt(j) else 0
         dt = j.get("date")
-        if dt is None:
-            return (flex, 0, datetime.min.replace(tzinfo=timezone.utc), j.get("_score", 0))
-        return (flex, 1, dt, j.get("_score", 0))
+        has_date = 0 if dt is None else 1
+        dt = dt or datetime.min.replace(tzinfo=timezone.utc)
+        return (prob, flex, has_date, dt, j.get("_score", 0))
     return sorted(jobs, key=sort_key, reverse=True)
 
 
@@ -3285,10 +3328,13 @@ def _render_row(j: dict, new_ids: set[str]) -> str:
 
 def render_html(jobs: list[dict], new_ids: set[str], stats: dict) -> str:
     today = datetime.now().strftime("%A, %B %d, %Y")
-    rows = [_render_row(j, new_ids) for j in jobs if not j.get("_entry") and not j.get("_high_pay")]
-    high_jobs = sorted((j for j in jobs if j.get("_high_pay") and not j.get("_entry")), key=lambda j: j["_pay_usd"], reverse=True)
-    high_rows = [_render_row(j, new_ids) for j in high_jobs]
     entry_rows = [_render_row(j, new_ids) for j in jobs if j.get("_entry")]
+    us_tax_rows = [_render_row(j, new_ids) for j in jobs if j.get("_us_tax") and not j.get("_entry")]
+    high_jobs = sorted((j for j in jobs if j.get("_high_pay") and not j.get("_entry") and not j.get("_us_tax")),
+                       key=lambda j: j["_pay_usd"], reverse=True)
+    high_rows = [_render_row(j, new_ids) for j in high_jobs]
+    rows = [_render_row(j, new_ids) for j in jobs
+            if not j.get("_entry") and not j.get("_us_tax") and not j.get("_high_pay")]
 
     source_summary = ", ".join(
         f"{name}: {count}" for name, count in sorted(stats["per_source"].items())
@@ -3432,6 +3478,7 @@ tr.flex-row td:first-child {{ padding-left: 10px; }}
 .entry-reason {{ font-size: 0.78rem; color: #34d399; margin-top: 3px; }}
 .badge.entry-cat {{ background: rgba(52, 211, 153, 0.15); color: #34d399; }}
 .empty.small {{ padding: 16px; }}
+.ustax-table {{ border: 1px solid rgba(96, 165, 250, 0.45); }}
 .high-table {{ border: 1px solid rgba(251, 191, 36, 0.4); }}
 .high-pay {{ font-size: 0.78rem; color: #fbbf24; margin-top: 3px; }}
 .tz-note {{ font-size: 0.78rem; color: #7dd3fc; margin-top: 3px; }}
@@ -3453,15 +3500,18 @@ tr.flex-row td:first-child {{ padding-left: 10px; }}
     <div class="stat-card"><div class="num">{stats['new']}</div><div class="label">New today</div></div>
     <div class="stat-card"><div class="num">{stats['strong']}</div><div class="label">Strong match</div></div>
 </div>
-<h2 class="section-title">True entry-level: tax, legal &amp; analyst <span class="section-count">{len(entry_rows)}</span></h2>
-<div class="section-note">Remote roles whose full posting asks for no prior experience. Each row says why it qualified.</div>
-{"<table class='entry-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(entry_rows) + "</tbody></table>" if entry_rows else '<div class="empty small">No genuine entry-level tax, legal or analyst jobs today.</div>'}
+<h2 class="section-title">&#11088; Easiest to get hired: genuine entry-level <span class="section-count">{len(entry_rows)}</span></h2>
+<div class="section-note">Your highest-chance roles &mdash; bookkeeping, accounting, tax, legal &amp; analyst postings whose full text asks for <em>no prior experience</em> (training provided, junior/trainee, or 0&ndash;2 years). Highest Fit %% first. Each row says why it qualified.</div>
+{"<table class='entry-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(entry_rows) + "</tbody></table>" if entry_rows else '<div class="empty small">No genuine entry-level roles today.</div>'}
+<h2 class="section-title">&#127482;&#127480; US Tax roles (your goal) <span class="section-count">{len(us_tax_rows)}</span></h2>
+<div class="section-note">US tax postings that cleared the experience filter &mdash; they do <em>not</em> demand the 2+ years of US tax experience you don't have yet. Highest Fit %% first.</div>
+{"<table class='ustax-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(us_tax_rows) + "</tbody></table>" if us_tax_rows else '<div class="empty small">No US tax roles cleared the filters today.</div>'}
 <h2 class="section-title">High pay: ${HIGH_PAY_MIN_USD:,}+ a month <span class="section-count">{len(high_rows)}</span></h2>
 <div class="section-note">Remote roles you can apply to from the Philippines whose stated pay can reach ${HIGH_PAY_MIN_USD:,} a month, highest first. Hourly rates assume full-time unless the posting gives weekly hours.</div>
 {"<table class='high-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(high_rows) + "</tbody></table>" if high_rows else '<div class="empty small">No jobs with stated pay at this level today.</div>'}
 <h2 class="section-title">All other jobs <span class="section-count">{len(rows)}</span></h2>
 {"<table><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>" if rows else '<div class="empty">No matching jobs found today. The scraper will check again tomorrow.</div>'}
-<div class="footer">Part-time &amp; flexible-hours jobs shown first, then by posting date (newest first). Score based on Xero, NZ/AU, part-time, bookkeeping keywords.</div>
+<div class="footer">Sorted by Fit %% (your estimated chance of getting accepted) first, then flexible/part-time, then newest. Fit %% weighs skill match, eligibility and competition; Match score weighs Xero, NZ/AU, part-time and bookkeeping keywords.</div>
 </body>
 </html>"""
 
@@ -3504,6 +3554,7 @@ def main():
     jobs = mark_entry_level(jobs)
     jobs = exclude_country_experience_required(jobs)
     jobs = exclude_blocked_hours(jobs)
+    mark_us_tax(jobs)
     mark_high_pay(jobs)
     jobs = sort_jobs(jobs)
 
