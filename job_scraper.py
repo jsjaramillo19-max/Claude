@@ -1720,10 +1720,11 @@ def scrape_workable(queries: list[str] | None = None, accept=None) -> list[dict]
 
 
 def _relative_age_to_date(text: str) -> datetime | None:
-    m = re.search(r"(\d+)\+?\s*(hour|day|week|month)s?\s+ago", text or "", re.I)
+    m = re.search(r"(\d+|an?)\+?\s*(hour|day|week|month)s?\s+ago", text or "", re.I)
     if not m:
         return datetime.now(timezone.utc) if re.search(r"today|just now|hours? ago", text or "", re.I) else None
-    n, unit = int(m.group(1)), m.group(2).lower()
+    n = 1 if m.group(1).lower() in ("a", "an") else int(m.group(1))
+    unit = m.group(2).lower()
     days = {"hour": n / 24, "day": n, "week": n * 7, "month": n * 30}[unit]
     return datetime.now(timezone.utc) - timedelta(days=days)
 
@@ -1788,6 +1789,76 @@ def _too_old_to_fetch(title: str, listed: datetime | None) -> bool:
         return False
     days = NICHE_MAX_AGE_DAYS if NICHE_PATTERN.search(title.lower()) else MAX_AGE_DAYS
     return listed < datetime.now(timezone.utc) - timedelta(days=days + 1)
+
+
+def _fetch_posted_date(url: str) -> datetime | None:
+    """Recover a posting date from a job page when the source feed omitted it.
+
+    Prefers the schema.org JobPosting datePosted; falls back to a visible
+    "Posted/Updated N days ago" on the page. Returns a tz-aware datetime or None.
+    """
+    try:
+        resp = requests.get(url, headers=_headers(), timeout=REQUEST_TIMEOUT)
+    except Exception:
+        return None
+    soup = BeautifulSoup(resp.text, "html.parser")
+    # 1) schema.org JobPosting datePosted — the reliable path
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string or "")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        nodes = data.get("@graph", [data]) if isinstance(data, dict) else data
+        for node in nodes if isinstance(nodes, list) else []:
+            if isinstance(node, dict) and node.get("@type") == "JobPosting" and node.get("datePosted"):
+                try:
+                    dt = dateparser.parse(str(node["datePosted"]))
+                except (ValueError, OverflowError, TypeError):
+                    dt = None
+                if dt:
+                    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    # 2) visible relative age. Prefer one anchored to posted/updated wording; otherwise take the
+    #    first hour/day/week/month "ago" on the page (years are excluded, so testimonials won't match).
+    text = soup.get_text(" ", strip=True)
+    age_token = r"(?:\d+|an?)\+?\s*(?:hour|day|week|month)s?\s+ago"
+    anchored = re.search(r"(?:posted|updated|listed|published)\b[^.|\n]{0,40}?" + age_token, text, re.I)
+    if anchored:
+        return _relative_age_to_date(anchored.group(0))
+    m = re.search(age_token, text, re.I)
+    return _relative_age_to_date(m.group(0)) if m else None
+
+
+def backfill_dates(jobs: list[dict]) -> None:
+    """Fetch posting dates for keeper jobs whose source feed omitted them.
+
+    Without a date, filter_jobs can't apply the freshness cutoff and the post bypasses
+    it entirely (e.g. an 11-day-old listing surviving the 7-day window). We only fetch
+    for jobs that already pass the cheap exclude/remote checks, grouped per host so one
+    site isn't hammered.
+    """
+    missing = [j for j in jobs
+               if not j.get("date") and j.get("url")
+               and not is_excluded(j["title"], j.get("description", ""), j.get("location", ""))
+               and is_confirmed_remote(j)]
+    if not missing:
+        return
+    from urllib.parse import urlsplit
+    lanes: dict[str, list[dict]] = {}
+    for j in missing:
+        lanes.setdefault(urlsplit(j["url"]).netloc, []).append(j)
+
+    def run_lane(group: list[dict]) -> None:
+        for j in group:
+            dt = _fetch_posted_date(j["url"])
+            if dt:
+                j["date"] = dt
+                j["date_raw"] = j.get("date_raw") or "backfilled"
+            time.sleep(random.uniform(0.3, 0.7))
+
+    with ThreadPoolExecutor(max_workers=min(10, len(lanes))) as pool:
+        list(pool.map(run_lane, lanes.values()))
+    got = sum(1 for j in missing if j.get("date"))
+    print(f"Backfilled dates: {got}/{len(missing)} undated jobs")
 
 
 def _ph_eligible(countries: list[str], strict: bool = False) -> bool:
@@ -3046,6 +3117,9 @@ def deduplicate(jobs: list[dict]) -> list[dict]:
                     kept["salary"] = j["salary"]
                 if len(j.get("description") or "") > len(kept.get("description") or ""):
                     kept["description"] = j["description"]
+                # a syndicated copy may carry the posting date the kept one lacks
+                if not kept.get("date") and j.get("date"):
+                    kept["date"], kept["date_raw"] = j["date"], j.get("date_raw", "")
                 continue
         entry = {**j, "_id": jid}
         if company:
@@ -3420,6 +3494,8 @@ def main():
 
     jobs = deduplicate(all_jobs)
     print(f"After dedup:  {len(jobs)}")
+
+    backfill_dates(jobs)
 
     jobs = filter_jobs(jobs)
     print(f"After filter: {len(jobs)}")
