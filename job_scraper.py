@@ -3005,6 +3005,47 @@ def exclude_blocked_hours(jobs: list[dict]) -> list[dict]:
     return kept
 
 
+# Employer review ratings (overall / work-life-balance out of 5) for the larger recruiters that recur in this market
+# and actually have a review footprint. Small firms (most of the market) have none, so those keep the keyword estimate.
+# Hand-curated from Glassdoor/Indeed; ratings drift slowly, so refresh every few months. Source noted per entry.
+EMPLOYER_REVIEWS_RAW = [
+    (["TOA Global", "TOA"], {"rating": 3.9, "wlb": 4.1, "n": 54, "src": "Glassdoor"}),
+    (["BruntWork"], {"rating": 4.9, "wlb": 4.8, "n": 1373, "src": "Glassdoor/Indeed"}),
+    (["Staff Domain", "Staff Domain Inc"], {"rating": 4.6, "wlb": 4.6, "n": 183, "src": "Glassdoor"}),
+    (["Virtual Coworker"], {"rating": 4.3, "wlb": 3.8, "n": 7, "src": "Glassdoor/Indeed"}),
+    (["Outsourced", "Outsourced.ph"], {"rating": 4.2, "wlb": 4.8, "n": 29, "src": "Indeed"}),
+    (["Cloudstaff"], {"rating": 4.2, "wlb": 4.3, "n": 258, "src": "Indeed"}),
+    (["MicroSourcing"], {"rating": 4.0, "wlb": 4.1, "n": 197, "src": "Glassdoor/Indeed"}),
+    (["Booth & Partners", "Booth and Partners", "Booth"], {"rating": 3.5, "wlb": 4.0, "n": 157, "src": "Glassdoor/Indeed"}),
+    (["Sourcefit", "Sourcefit Philippines"], {"rating": 3.5, "wlb": 4.3, "n": 107, "src": "Glassdoor/Indeed"}),
+    (["Somewhere", "Shepherd"], {"rating": 4.5, "wlb": None, "n": None, "src": "Trustpilot"}),
+]
+
+
+def _norm_employer(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+EMPLOYER_REVIEWS = {_norm_employer(alias): data for aliases, data in EMPLOYER_REVIEWS_RAW for alias in aliases}
+
+
+def enrich_employer_reviews(jobs: list[dict]) -> None:
+    """Attach real Glassdoor/Indeed ratings to jobs whose employer (company or source) is a known larger recruiter.
+    Everything else keeps the keyword-based workload estimate -- most small firms have no review footprint to verify."""
+    matched = 0
+    for j in jobs:
+        for name in (j.get("company"), j.get("source")):
+            data = EMPLOYER_REVIEWS.get(_norm_employer(name))
+            if data:
+                j["_employer_rating"] = data["rating"]
+                j["_employer_wlb"] = data["wlb"]
+                j["_employer_reviews_n"] = data["n"]
+                j["_employer_src"] = data["src"]
+                matched += 1
+                break
+    print(f"Employer review ratings matched: {matched} jobs")
+
+
 def mark_us_tax(jobs: list[dict]) -> None:
     """Flag US tax roles (the user's goal). These survived the experience filter, so they don't demand the
     2+ years of US tax experience the user lacks -- the ones actually worth applying to."""
@@ -3298,6 +3339,14 @@ def _render_row(j: dict, new_ids: set[str]) -> str:
     busy_classes = {1: "busy-light", 2: "busy-easy", 3: "busy-mod", 4: "busy-busy", 5: "busy-heavy"}
     busy_class = busy_classes.get(busy, "busy-mod")
 
+    # Real employer rating when the company is a known larger recruiter; otherwise just the keyword estimate.
+    emp_html = ""
+    if j.get("_employer_rating"):
+        wlb = f" &middot; WLB {j['_employer_wlb']:.1f}" if j.get("_employer_wlb") else ""
+        n = j.get("_employer_reviews_n")
+        tip = f"{j.get('_employer_src', '')} {j['_employer_rating']:.1f}/5 overall" + (f", {n} reviews" if n else "")
+        emp_html = f"<br><small class='emp-rating' title='{tip}'>&#9733; {j['_employer_rating']:.1f}{wlb}</small>"
+
     is_flex = bool(flex_badge or pt_badge)
     row_classes = []
     if is_new:
@@ -3320,7 +3369,7 @@ def _render_row(j: dict, new_ids: set[str]) -> str:
         <td>{j['location']}</td>
         <td>{pay_html}</td>
         <td><span class="badge {prob_class}">{prob}%</span></td>
-        <td><span class="{busy_class}" title="{busy_label}">{busy_dots}</span><br><small class="busy-label">{busy_label}</small></td>
+        <td><span class="{busy_class}" title="{busy_label}">{busy_dots}</span><br><small class="busy-label">{busy_label}</small>{emp_html}</td>
         <td><span class="badge {match_class}">{match_label}</span></td>
         <td class="source">{j['source']}</td>
     </tr>"""
@@ -3479,6 +3528,7 @@ tr.flex-row td:first-child {{ padding-left: 10px; }}
 .badge.entry-cat {{ background: rgba(52, 211, 153, 0.15); color: #34d399; }}
 .empty.small {{ padding: 16px; }}
 .ustax-table {{ border: 1px solid rgba(96, 165, 250, 0.45); }}
+.emp-rating {{ color: #fbbf24; font-size: 0.72rem; white-space: nowrap; }}
 .high-table {{ border: 1px solid rgba(251, 191, 36, 0.4); }}
 .high-pay {{ font-size: 0.78rem; color: #fbbf24; margin-top: 3px; }}
 .tz-note {{ font-size: 0.78rem; color: #7dd3fc; margin-top: 3px; }}
@@ -3556,6 +3606,7 @@ def main():
     jobs = exclude_blocked_hours(jobs)
     mark_us_tax(jobs)
     mark_high_pay(jobs)
+    enrich_employer_reviews(jobs)
     jobs = sort_jobs(jobs)
 
     new_ids = set()
