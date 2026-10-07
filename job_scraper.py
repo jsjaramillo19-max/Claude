@@ -3059,6 +3059,22 @@ def mark_us_tax(jobs: list[dict]) -> None:
     print(f"US tax roles: {sum(1 for j in jobs if j.get('_us_tax'))} jobs")
 
 
+# AU/NZ bookkeeping -- the user's fastest-hire fit (CPA + EY AU/NZ audit + Xero NZ Payroll).
+AUNZ_SIGNAL = re.compile(r"\baustralia\b|australian|\bnew zealand\b|\bnz\b|\bbas\b|\bato\b|\bird\b|smsf|myob|smartly", re.I)
+AUNZ_CORE = re.compile(r"xero|bookkeep|account", re.I)
+
+
+def mark_aunz(jobs: list[dict]) -> None:
+    """Flag AU/NZ Xero/bookkeeping roles -- the user's strongest, fastest-hire fit."""
+    for j in jobs:
+        if SENIOR_TITLE.search(j["title"]):
+            continue
+        text = f"{j['title']} {get_full_text(j) or j.get('description', '')}"
+        if AUNZ_SIGNAL.search(text) and AUNZ_CORE.search(text):
+            j["_aunz"] = True
+    print(f"AU/NZ bookkeeping roles: {sum(1 for j in jobs if j.get('_aunz'))} jobs")
+
+
 def mark_high_pay(jobs: list[dict]) -> None:
     """Flag jobs whose stated pay can reach HIGH_PAY_MIN_USD a month (top of the range)."""
     for j in jobs:
@@ -3377,13 +3393,16 @@ def _render_row(j: dict, new_ids: set[str]) -> str:
 
 def render_html(jobs: list[dict], new_ids: set[str], stats: dict) -> str:
     today = datetime.now().strftime("%A, %B %d, %Y")
-    entry_rows = [_render_row(j, new_ids) for j in jobs if j.get("_entry")]
-    us_tax_rows = [_render_row(j, new_ids) for j in jobs if j.get("_us_tax") and not j.get("_entry")]
-    high_jobs = sorted((j for j in jobs if j.get("_high_pay") and not j.get("_entry") and not j.get("_us_tax")),
+    # Your apply-list: the two target types (US tax + AU/NZ bookkeeping), surfaced at the very top.
+    def in_applylist(j):
+        return j.get("_us_tax") or j.get("_aunz")
+    apply_rows = [_render_row(j, new_ids) for j in jobs if in_applylist(j)]
+    entry_rows = [_render_row(j, new_ids) for j in jobs if j.get("_entry") and not in_applylist(j)]
+    high_jobs = sorted((j for j in jobs if j.get("_high_pay") and not j.get("_entry") and not in_applylist(j)),
                        key=lambda j: j["_pay_usd"], reverse=True)
     high_rows = [_render_row(j, new_ids) for j in high_jobs]
     rows = [_render_row(j, new_ids) for j in jobs
-            if not j.get("_entry") and not j.get("_us_tax") and not j.get("_high_pay")]
+            if not j.get("_entry") and not in_applylist(j) and not j.get("_high_pay")]
 
     source_summary = ", ".join(
         f"{name}: {count}" for name, count in sorted(stats["per_source"].items())
@@ -3550,12 +3569,12 @@ tr.flex-row td:first-child {{ padding-left: 10px; }}
     <div class="stat-card"><div class="num">{stats['new']}</div><div class="label">New today</div></div>
     <div class="stat-card"><div class="num">{stats['strong']}</div><div class="label">Strong match</div></div>
 </div>
+<h2 class="section-title">&#127919; Your apply-list: US tax + AU/NZ (apply this week) <span class="section-count">{len(apply_rows)}</span></h2>
+<div class="section-note">Your two target role types, surfaced together &mdash; <strong>US tax</strong> postings that don't require US experience you lack, and <strong>AU/NZ Xero/bookkeeping</strong> roles (your fastest-hire fit). Highest Fit %% first. Apply within 1&ndash;2 days; match the CV to the role.</div>
+{"<table class='ustax-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(apply_rows) + "</tbody></table>" if apply_rows else '<div class="empty small">No US tax or AU/NZ roles cleared the filters today.</div>'}
 <h2 class="section-title">&#11088; Easiest to get hired: genuine entry-level <span class="section-count">{len(entry_rows)}</span></h2>
 <div class="section-note">Your highest-chance roles &mdash; bookkeeping, accounting, tax, legal &amp; analyst postings whose full text asks for <em>no prior experience</em> (training provided, junior/trainee, or 0&ndash;2 years). Highest Fit %% first. Each row says why it qualified.</div>
 {"<table class='entry-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(entry_rows) + "</tbody></table>" if entry_rows else '<div class="empty small">No genuine entry-level roles today.</div>'}
-<h2 class="section-title">&#127482;&#127480; US Tax roles (your goal) <span class="section-count">{len(us_tax_rows)}</span></h2>
-<div class="section-note">US tax postings that cleared the experience filter &mdash; they do <em>not</em> demand the 2+ years of US tax experience you don't have yet. Highest Fit %% first.</div>
-{"<table class='ustax-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(us_tax_rows) + "</tbody></table>" if us_tax_rows else '<div class="empty small">No US tax roles cleared the filters today.</div>'}
 <h2 class="section-title">High pay: ${HIGH_PAY_MIN_USD:,}+ a month <span class="section-count">{len(high_rows)}</span></h2>
 <div class="section-note">Remote roles you can apply to from the Philippines whose stated pay can reach ${HIGH_PAY_MIN_USD:,} a month, highest first. Hourly rates assume full-time unless the posting gives weekly hours.</div>
 {"<table class='high-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(high_rows) + "</tbody></table>" if high_rows else '<div class="empty small">No jobs with stated pay at this level today.</div>'}
@@ -3605,6 +3624,7 @@ def main():
     jobs = exclude_country_experience_required(jobs)
     jobs = exclude_blocked_hours(jobs)
     mark_us_tax(jobs)
+    mark_aunz(jobs)
     mark_high_pay(jobs)
     enrich_employer_reviews(jobs)
     jobs = sort_jobs(jobs)
