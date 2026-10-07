@@ -1110,51 +1110,62 @@ def scrape_onlinejobs_ph(queries: list[str] | None = None, accept=None) -> list[
     queries = queries or ["bookkeeper", "accountant", "xero", "accounting", "reconciliation", "tax preparer", "tax preparation", "tax assistant", "junior tax", "hawaii",
                "nz bookkeeper", "nz accountant", "new zealand bookkeeper", "new zealand accountant",
                "au nz accountant", "myob"]
+    seen = set()
+    # read the first few result pages per keyword, not just page 0, so live roles don't drop between runs
     for q in queries:
-        try:
-            url = f"https://www.onlinejobs.ph/jobseekers/jobsearch/0?jobkeyword={q}&jobcategory=&salary_from=&salary_to="
-            resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-            if resp.status_code != 200:
-                continue
-            soup = BeautifulSoup(resp.content, "html.parser")
-            for box in soup.find_all("div", class_="jobpost-cat-box"):
-                title_el = box.find("h4")
-                if not title_el:
-                    continue
-                badge = title_el.find("span", class_="badge")
-                job_type = badge.get_text(strip=True) if badge else ""
-                if badge:
-                    badge.decompose()
-                title = title_el.get_text(strip=True)
-                link_el = box.find("a", href=re.compile(r"/jobseekers/job/"))
-                link = ""
-                if link_el:
-                    href = link_el["href"]
-                    link = href if href.startswith("http") else f"https://www.onlinejobs.ph{href}"
-                salary_el = box.find("dd")
-                salary = salary_el.get_text(strip=True) if salary_el else ""
-                desc_el = box.find("div", class_="desc")
-                desc = desc_el.get_text(strip=True)[:500] if desc_el else ""
-                date_el = box.find("p", attrs={"data-temp": True})
-                date_str = date_el.get("data-temp", "") if date_el else ""
-                tag_els = box.find_all("a", class_="badge")
-                tags = [t.get_text(strip=True) for t in tag_els]
-                if not accept(title, desc):
-                    continue
-                jobs.append({
-                    "title": f"{title} ({job_type})" if job_type else title,
-                    "company": "",
-                    "url": link,
-                    "location": "Philippines (Remote)",
-                    "date_raw": date_str,
-                    "date": parse_date_fuzzy(date_str) if date_str else None,
-                    "description": desc,
-                    "salary": salary,
-                    "tags": tags,
-                    "source": "OnlineJobs.ph",
-                })
-        except Exception as e:
-            print(f"  [OnlineJobs.ph/{q}] error: {e}")
+        for page in range(3):
+            try:
+                url = f"https://www.onlinejobs.ph/jobseekers/jobsearch/{page}?jobkeyword={q}&jobcategory=&salary_from=&salary_to="
+                resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+                if resp.status_code != 200:
+                    break
+                boxes = BeautifulSoup(resp.content, "html.parser").find_all("div", class_="jobpost-cat-box")
+                if not boxes:
+                    break
+                for box in boxes:
+                    title_el = box.find("h4")
+                    if not title_el:
+                        continue
+                    badge = title_el.find("span", class_="badge")
+                    job_type = badge.get_text(strip=True) if badge else ""
+                    if badge:
+                        badge.decompose()
+                    title = title_el.get_text(strip=True)
+                    link_el = box.find("a", href=re.compile(r"/jobseekers/job/"))
+                    link = ""
+                    if link_el:
+                        href = link_el["href"]
+                        link = href if href.startswith("http") else f"https://www.onlinejobs.ph{href}"
+                    if link and link in seen:
+                        continue
+                    salary_el = box.find("dd")
+                    salary = salary_el.get_text(strip=True) if salary_el else ""
+                    desc_el = box.find("div", class_="desc")
+                    desc = desc_el.get_text(strip=True)[:500] if desc_el else ""
+                    date_el = box.find("p", attrs={"data-temp": True})
+                    date_str = date_el.get("data-temp", "") if date_el else ""
+                    tag_els = box.find_all("a", class_="badge")
+                    tags = [t.get_text(strip=True) for t in tag_els]
+                    if not accept(title, desc):
+                        continue
+                    if link:
+                        seen.add(link)
+                    jobs.append({
+                        "title": f"{title} ({job_type})" if job_type else title,
+                        "company": "",
+                        "url": link,
+                        "location": "Philippines (Remote)",
+                        "date_raw": date_str,
+                        "date": parse_date_fuzzy(date_str) if date_str else None,
+                        "description": desc,
+                        "salary": salary,
+                        "tags": tags,
+                        "source": "OnlineJobs.ph",
+                    })
+                time.sleep(random.uniform(0.3, 0.7))
+            except Exception as e:
+                print(f"  [OnlineJobs.ph/{q} p{page}] error: {e}")
+                break
     return jobs
 
 
@@ -3288,7 +3299,7 @@ def sort_jobs(jobs: list[dict]) -> list[dict]:
 
 # ── HTML Report ─────────────────────────────────────────────────────────
 
-def _render_row(j: dict, new_ids: set[str]) -> str:
+def _render_row(j: dict, new_ids: set[str], section: str = "") -> str:
     is_new = j["_id"] in new_ids
     new_badge = '<span class="badge new">NEW</span>' if is_new else ""
     entry_html = ""
@@ -3370,8 +3381,11 @@ def _render_row(j: dict, new_ids: set[str]) -> str:
     if is_flex:
         row_classes.append("flex-row")
 
+    jid = html_escape(str(j.get("_id", "")))
+    search_blob = html_escape(f"{j['title']} {j.get('company', '')} {j['source']}".lower())
+    src_attr = html_escape(j["source"])
     return f"""
-    <tr class="{' '.join(row_classes)}">
+    <tr class="{' '.join(row_classes)}" data-id="{jid}" data-fit="{prob}" data-source="{src_attr}" data-section="{section}" data-search="{search_blob}">
         <td class="freshness">{freshness_label(j['date'])}</td>
         <td>
             <a href="{j['url']}" target="_blank" class="job-title">{j['title']}</a>
@@ -3381,10 +3395,11 @@ def _render_row(j: dict, new_ids: set[str]) -> str:
             {entry_html}
             <div class="desc">{desc_preview}</div>
             {tags_html}
+            <div class="rowctl"><button type="button" class="ctl ctl-applied" onclick="jobMark('{jid}','applied')">&#10003; applied</button><button type="button" class="ctl ctl-hide" onclick="jobMark('{jid}','hidden')">&#10005; hide</button></div>
         </td>
         <td>{j['location']}</td>
         <td>{pay_html}</td>
-        <td><span class="badge {prob_class}">{prob}%</span></td>
+        <td data-sort="{prob}"><span class="badge {prob_class}">{prob}%</span></td>
         <td><span class="{busy_class}" title="{busy_label}">{busy_dots}</span><br><small class="busy-label">{busy_label}</small>{emp_html}</td>
         <td><span class="badge {match_class}">{match_label}</span></td>
         <td class="source">{j['source']}</td>
@@ -3396,17 +3411,110 @@ def render_html(jobs: list[dict], new_ids: set[str], stats: dict) -> str:
     # Your apply-list: the two target types (US tax + AU/NZ bookkeeping), surfaced at the very top.
     def in_applylist(j):
         return j.get("_us_tax") or j.get("_aunz")
-    apply_rows = [_render_row(j, new_ids) for j in jobs if in_applylist(j)]
-    entry_rows = [_render_row(j, new_ids) for j in jobs if j.get("_entry") and not in_applylist(j)]
+    apply_rows = [_render_row(j, new_ids, "apply-list") for j in jobs if in_applylist(j)]
+    entry_rows = [_render_row(j, new_ids, "entry-level") for j in jobs if j.get("_entry") and not in_applylist(j)]
     high_jobs = sorted((j for j in jobs if j.get("_high_pay") and not j.get("_entry") and not in_applylist(j)),
                        key=lambda j: j["_pay_usd"], reverse=True)
-    high_rows = [_render_row(j, new_ids) for j in high_jobs]
-    rows = [_render_row(j, new_ids) for j in jobs
+    high_rows = [_render_row(j, new_ids, "high-pay") for j in high_jobs]
+    rows = [_render_row(j, new_ids, "other") for j in jobs
             if not j.get("_entry") and not in_applylist(j) and not j.get("_high_pay")]
 
     source_summary = ", ".join(
         f"{name}: {count}" for name, count in sorted(stats["per_source"].items())
     )
+
+    # Excel-style controls: live search, min-Fit, source/section filters, applied/hide marks, sortable columns.
+    controls_html = """
+<div class="controls">
+  <input id="f-search" type="text" placeholder="Search title, company or source…" oninput="applyFilters()">
+  <label class="fctl">Min Fit <input id="f-fit" type="number" min="0" max="100" value="0" oninput="applyFilters()">%</label>
+  <select id="f-source" onchange="applyFilters()"><option value="">All sources</option></select>
+  <select id="f-section" onchange="applyFilters()">
+    <option value="">All sections</option>
+    <option value="apply-list">Apply-list</option>
+    <option value="entry-level">Entry-level</option>
+    <option value="high-pay">High pay</option>
+    <option value="other">Other</option>
+  </select>
+  <label class="fctl"><input id="f-hideapplied" type="checkbox" onchange="applyFilters()"> Hide applied/hidden</label>
+  <button type="button" class="ctl" onclick="resetMarks()">Reset marks</button>
+  <span id="f-count" class="fcount"></span>
+</div>
+<div class="hint">Tip: click a column header to sort. Mark rows &#10003; applied or &#10005; hide &mdash; marks persist on this device.</div>"""
+
+    filter_js = """
+<script>
+const MARK_KEY = 'jobScraperMarks';
+function loadMarks(){ try { return JSON.parse(localStorage.getItem(MARK_KEY) || '{}'); } catch(e){ return {}; } }
+function saveMarks(m){ try { localStorage.setItem(MARK_KEY, JSON.stringify(m)); } catch(e){} }
+let marks = loadMarks();
+function jobMark(id, state){
+  if (marks[id] === state) { delete marks[id]; } else { marks[id] = state; }
+  saveMarks(marks); applyFilters();
+}
+function resetMarks(){ marks = {}; saveMarks(marks); applyFilters(); }
+function applyFilters(){
+  const q = (document.getElementById('f-search').value || '').toLowerCase().trim();
+  const minFit = parseInt(document.getElementById('f-fit').value || '0', 10) || 0;
+  const src = document.getElementById('f-source').value;
+  const sec = document.getElementById('f-section').value;
+  const hideMarked = document.getElementById('f-hideapplied').checked;
+  let shown = 0;
+  document.querySelectorAll('tr[data-id]').forEach(function(tr){
+    const id = tr.getAttribute('data-id');
+    const mark = marks[id];
+    tr.classList.toggle('row-applied', mark === 'applied');
+    tr.classList.toggle('row-hidden', mark === 'hidden');
+    let ok = true;
+    if (q && (tr.getAttribute('data-search') || '').indexOf(q) === -1) ok = false;
+    if (ok && (parseInt(tr.getAttribute('data-fit') || '0', 10) < minFit)) ok = false;
+    if (ok && src && tr.getAttribute('data-source') !== src) ok = false;
+    if (ok && sec && tr.getAttribute('data-section') !== sec) ok = false;
+    if (ok && hideMarked && mark) ok = false;
+    tr.style.display = ok ? '' : 'none';
+    if (ok) shown++;
+  });
+  const c = document.getElementById('f-count');
+  if (c) c.textContent = shown + ' shown';
+}
+function initSources(){
+  const sel = document.getElementById('f-source');
+  const set = new Set();
+  document.querySelectorAll('tr[data-id]').forEach(function(tr){ set.add(tr.getAttribute('data-source')); });
+  Array.from(set).filter(Boolean).sort().forEach(function(s){
+    const o = document.createElement('option'); o.value = s; o.textContent = s; sel.appendChild(o);
+  });
+}
+function cellVal(tr, i){
+  const td = tr.children[i]; if (!td) return '';
+  const ds = td.getAttribute('data-sort'); if (ds !== null) return parseFloat(ds);
+  const t = td.textContent.trim();
+  const n = parseFloat(t.replace(/[^0-9.\\-]/g, ''));
+  return isNaN(n) ? t.toLowerCase() : n;
+}
+function initSort(){
+  document.querySelectorAll('table').forEach(function(table){
+    const ths = table.querySelectorAll('thead th');
+    ths.forEach(function(th, idx){
+      th.style.cursor = 'pointer'; th.title = 'Click to sort';
+      let asc = false;
+      th.addEventListener('click', function(){
+        asc = !asc;
+        const tbody = table.querySelector('tbody');
+        const rows = Array.from(tbody.querySelectorAll('tr[data-id]'));
+        rows.sort(function(a,b){
+          const va = cellVal(a, idx), vb = cellVal(b, idx);
+          if (va < vb) return asc ? -1 : 1;
+          if (va > vb) return asc ? 1 : -1;
+          return 0;
+        });
+        rows.forEach(function(r){ tbody.appendChild(r); });
+      });
+    });
+  });
+}
+document.addEventListener('DOMContentLoaded', function(){ initSources(); initSort(); applyFilters(); });
+</script>"""
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -3548,6 +3656,22 @@ tr.flex-row td:first-child {{ padding-left: 10px; }}
 .empty.small {{ padding: 16px; }}
 .ustax-table {{ border: 1px solid rgba(96, 165, 250, 0.45); }}
 .emp-rating {{ color: #fbbf24; font-size: 0.72rem; white-space: nowrap; }}
+.controls {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 6px; position: sticky; top: 0; z-index: 5; }}
+.controls input[type=text] {{ flex: 1 1 220px; min-width: 160px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; font-size: 0.85rem; }}
+.controls input[type=number] {{ width: 54px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 6px; margin: 0 4px; }}
+.controls select {{ background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 0.85rem; }}
+.controls .fctl {{ font-size: 0.8rem; color: var(--text-muted); display: inline-flex; align-items: center; }}
+.fcount {{ font-size: 0.8rem; color: var(--accent); margin-left: auto; font-weight: 600; }}
+.hint {{ font-size: 0.75rem; color: var(--text-muted); margin-bottom: 14px; }}
+.ctl {{ background: var(--bg); color: var(--text-muted); border: 1px solid var(--border); border-radius: 5px; padding: 5px 9px; font-size: 0.75rem; cursor: pointer; }}
+.ctl:hover {{ color: var(--text); border-color: var(--accent); }}
+.rowctl {{ margin-top: 6px; display: flex; gap: 6px; }}
+.ctl-applied:hover {{ color: var(--green); border-color: var(--green); }}
+.ctl-hide:hover {{ color: var(--red); border-color: var(--red); }}
+tr.row-applied {{ opacity: 0.55; }}
+tr.row-applied .job-title::after {{ content: " \\2713"; color: var(--green); }}
+tr.row-hidden {{ opacity: 0.4; }}
+th {{ user-select: none; }}
 .high-table {{ border: 1px solid rgba(251, 191, 36, 0.4); }}
 .high-pay {{ font-size: 0.78rem; color: #fbbf24; margin-top: 3px; }}
 .tz-note {{ font-size: 0.78rem; color: #7dd3fc; margin-top: 3px; }}
@@ -3569,6 +3693,7 @@ tr.flex-row td:first-child {{ padding-left: 10px; }}
     <div class="stat-card"><div class="num">{stats['new']}</div><div class="label">New today</div></div>
     <div class="stat-card"><div class="num">{stats['strong']}</div><div class="label">Strong match</div></div>
 </div>
+{controls_html}
 <h2 class="section-title">&#127919; Your apply-list: US tax + AU/NZ (apply this week) <span class="section-count">{len(apply_rows)}</span></h2>
 <div class="section-note">Your two target role types, surfaced together &mdash; <strong>US tax</strong> postings that don't require US experience you lack, and <strong>AU/NZ Xero/bookkeeping</strong> roles (your fastest-hire fit). Highest Fit %% first. Apply within 1&ndash;2 days; match the CV to the role.</div>
 {"<table class='ustax-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(apply_rows) + "</tbody></table>" if apply_rows else '<div class="empty small">No US tax or AU/NZ roles cleared the filters today.</div>'}
@@ -3581,6 +3706,7 @@ tr.flex-row td:first-child {{ padding-left: 10px; }}
 <h2 class="section-title">All other jobs <span class="section-count">{len(rows)}</span></h2>
 {"<table><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>" if rows else '<div class="empty">No matching jobs found today. The scraper will check again tomorrow.</div>'}
 <div class="footer">Sorted by Fit %% (your estimated chance of getting accepted) first, then flexible/part-time, then newest. Fit %% weighs skill match, eligibility and competition; Match score weighs Xero, NZ/AU, part-time and bookkeeping keywords.</div>
+{filter_js}
 </body>
 </html>"""
 
