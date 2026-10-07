@@ -3384,9 +3384,10 @@ def _render_row(j: dict, new_ids: set[str], section: str = "") -> str:
     jid = html_escape(str(j.get("_id", "")))
     search_blob = html_escape(f"{j['title']} {j.get('company', '')} {j['source']}".lower())
     src_attr = html_escape(j["source"])
+    date_sort = int(j["date"].timestamp()) if j.get("date") else 0  # epoch so the Posted column sorts chronologically
     return f"""
     <tr class="{' '.join(row_classes)}" data-id="{jid}" data-fit="{prob}" data-source="{src_attr}" data-section="{section}" data-search="{search_blob}">
-        <td class="freshness">{freshness_label(j['date'])}</td>
+        <td class="freshness" data-sort="{date_sort}">{freshness_label(j['date'])}</td>
         <td>
             <a href="{j['url']}" target="_blank" class="job-title">{j['title']}</a>
             {new_badge}
