@@ -3086,6 +3086,23 @@ def mark_aunz(jobs: list[dict]) -> None:
     print(f"AU/NZ bookkeeping roles: {sum(1 for j in jobs if j.get('_aunz'))} jobs")
 
 
+# Legal support roles a law student can do (and that build legal experience). Attorney/lawyer roles need a
+# license the user doesn't have yet, so they're excluded.
+LEGAL_LANE_TITLE = re.compile(
+    r"paralegal|legal (assistant|secretary|va|virtual|admin|support|intake|operations?|research\w*|clerk|coordinator)"
+    r"|litigation support|document review|conveyanc|legal ops|compliance (assistant|support)", re.I)
+ATTORNEY_TITLE = re.compile(r"\battorney\b|\blawyer\b|solicitor|barrister|\besq\b|general counsel", re.I)
+
+
+def mark_legal(jobs: list[dict]) -> None:
+    """Flag legal support / paralegal roles -- a law-student lane. Surviving legal-category roles are already
+    restricted to lane-appropriate titles by mark_entry_level."""
+    for j in jobs:
+        if j.get("category") == "legal" or j.get("_entry_category") == "legal":
+            j["_legal"] = True
+    print(f"Legal (law-student lane) roles: {sum(1 for j in jobs if j.get('_legal'))} jobs")
+
+
 def mark_high_pay(jobs: list[dict]) -> None:
     """Flag jobs whose stated pay can reach HIGH_PAY_MIN_USD a month (top of the range)."""
     for j in jobs:
@@ -3162,7 +3179,10 @@ def mark_entry_level(jobs: list[dict]) -> list[dict]:
                     j["_entry"], j["_entry_reason"], j["_entry_category"] = True, reason, cat
                 else:
                     j["_entry_reject"] = reason
-        if cat in ("tax", "bookkeeping") or j.get("_entry"):
+        # law-student lane: keep legal support/paralegal roles even when they ask for some experience
+        legal_lane = (cat == "legal" and LEGAL_LANE_TITLE.search(title)
+                      and not SENIOR_TITLE.search(title) and not ATTORNEY_TITLE.search(title))
+        if cat in ("tax", "bookkeeping") or j.get("_entry") or legal_lane:
             kept.append(j)
     found = {c: sum(1 for j in kept if j.get("_entry_category") == c) for c in checked}
     print("True entry-level: " + ", ".join(f"{ENTRY_CATEGORY_LABEL[c]} {found[c]}/{checked[c]}" for c in checked))
@@ -3286,14 +3306,15 @@ def _is_flex_or_pt(j: dict) -> bool:
 
 
 def sort_jobs(jobs: list[dict]) -> list[dict]:
-    """Highest chance of getting accepted first (the Fit % column), then flexible/part-time, then freshest."""
+    """Highest chance of getting accepted first (Fit %), with flexible/part-time given a strong lift
+    (the user balances law study), then freshest."""
     def sort_key(j):
         prob = j.get("_prob", 40)
-        flex = 1 if _is_flex_or_pt(j) else 0
+        flex_bonus = 12 if _is_flex_or_pt(j) else 0  # surface flexible/part-time well up the list
         dt = j.get("date")
         has_date = 0 if dt is None else 1
         dt = dt or datetime.min.replace(tzinfo=timezone.utc)
-        return (prob, flex, has_date, dt, j.get("_score", 0))
+        return (prob + flex_bonus, has_date, dt, j.get("_score", 0))
     return sorted(jobs, key=sort_key, reverse=True)
 
 
@@ -3411,7 +3432,7 @@ def render_html(jobs: list[dict], new_ids: set[str], stats: dict) -> str:
     today = datetime.now().strftime("%A, %B %d, %Y")
     # Your apply-list: the two target types (US tax + AU/NZ bookkeeping), surfaced at the very top.
     def in_applylist(j):
-        return j.get("_us_tax") or j.get("_aunz")
+        return j.get("_us_tax") or j.get("_aunz") or j.get("_legal")
     apply_rows = [_render_row(j, new_ids, "apply-list") for j in jobs if in_applylist(j)]
     entry_rows = [_render_row(j, new_ids, "entry-level") for j in jobs if j.get("_entry") and not in_applylist(j)]
     high_jobs = sorted((j for j in jobs if j.get("_high_pay") and not j.get("_entry") and not in_applylist(j)),
@@ -3695,8 +3716,8 @@ th {{ user-select: none; }}
     <div class="stat-card"><div class="num">{stats['strong']}</div><div class="label">Strong match</div></div>
 </div>
 {controls_html}
-<h2 class="section-title">&#127919; Your apply-list: US tax + AU/NZ (apply this week) <span class="section-count">{len(apply_rows)}</span></h2>
-<div class="section-note">Your two target role types, surfaced together &mdash; <strong>US tax</strong> postings that don't require US experience you lack, and <strong>AU/NZ Xero/bookkeeping</strong> roles (your fastest-hire fit). Highest Fit %% first. Apply within 1&ndash;2 days; match the CV to the role.</div>
+<h2 class="section-title">&#127919; Your apply-list: US tax + AU/NZ + legal (apply this week) <span class="section-count">{len(apply_rows)}</span></h2>
+<div class="section-note">Your target role types, surfaced together &mdash; <strong>US tax</strong> postings that don't require US experience you lack, <strong>AU/NZ Xero/bookkeeping</strong> (your fastest-hire fit), and <strong>legal support / paralegal</strong> roles (a law-student lane). Flexible/part-time surfaced higher. Apply within 1&ndash;2 days; match the CV to the role.</div>
 {"<table class='ustax-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(apply_rows) + "</tbody></table>" if apply_rows else '<div class="empty small">No US tax or AU/NZ roles cleared the filters today.</div>'}
 <h2 class="section-title">&#11088; Easiest to get hired: genuine entry-level <span class="section-count">{len(entry_rows)}</span></h2>
 <div class="section-note">Your highest-chance roles &mdash; bookkeeping, accounting, tax, legal &amp; analyst postings whose full text asks for <em>no prior experience</em> (training provided, junior/trainee, or 0&ndash;2 years). Highest Fit %% first. Each row says why it qualified.</div>
@@ -3752,6 +3773,7 @@ def main():
     jobs = exclude_blocked_hours(jobs)
     mark_us_tax(jobs)
     mark_aunz(jobs)
+    mark_legal(jobs)
     mark_high_pay(jobs)
     enrich_employer_reviews(jobs)
     jobs = sort_jobs(jobs)
