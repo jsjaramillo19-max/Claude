@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jobscraper.daily</string>
+
+  <!-- EDIT the path below to where you cloned this repo -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/CHANGE_ME/Claude/run_daily.sh</string>
+  </array>
+
+  <!-- Runs every day at 7:00 AM; change Hour/Minute to taste -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>7</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+
+  <!-- If the Mac was asleep at 7:00, run as soon as it wakes -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/jobscraper.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/jobscraper.err.log</string>
+</dict>
+</plist>
