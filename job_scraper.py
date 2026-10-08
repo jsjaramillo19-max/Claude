@@ -294,8 +294,9 @@ REQUEST_TIMEOUT = 30
 
 
 MAX_AGE_DAYS = 7
-# NZ/AU offshore roles (rare, closest to the user's experience) and company careers pages get a longer window
-NICHE_MAX_AGE_DAYS = 30
+# Fresh roles only: the user is risk-averse and time-limited, so apply where odds are best (<= 7 days).
+# (Was 30 for rare NZ/AU + careers-page roles; raise it back if the list feels too thin.)
+NICHE_MAX_AGE_DAYS = 7
 NICHE_PATTERN = re.compile(r"new zealand|\bnz\b|australia|\bau/nz\b|\bnz/au\b")
 
 
