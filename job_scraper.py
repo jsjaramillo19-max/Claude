@@ -3267,14 +3267,19 @@ def filter_jobs(jobs: list[dict]) -> list[dict]:
             continue
         if not is_confirmed_remote(j):
             continue
+        # drop dead listings whose page says the role is gone
+        if re.search(r"no job found|no longer available|position (has been )?filled|job (has )?expired|posting (has )?expired",
+                     f"{j['title']} {j.get('description', '')}", re.I):
+            continue
         if j["date"] and j["date"].tzinfo is None:
             j["date"] = j["date"].replace(tzinfo=timezone.utc)
         if j["date"]:
-            # company careers pages only list open roles, so they get the longer window, but a post still
-            # open after that is usually an evergreen ad or a role nobody fills
             longer = j.get("careers_page") or NICHE_PATTERN.search(f"{j['title']} {j['description']}".lower())
             if j["date"] < (niche_cutoff if longer else cutoff):
                 continue
+        else:
+            # no date even after backfill: can't confirm it's within the freshness window, so exclude it
+            continue
         j["_score"] = relevance_score(j["title"], j["description"], j.get("location", ""))
         j["_prob"] = acceptance_probability(j["title"], j["description"], j.get("location", ""), j.get("tags"))
         j["_busy"], j["_busy_label"] = busyness_rating(j["title"], j["description"])
