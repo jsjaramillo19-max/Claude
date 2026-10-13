@@ -3131,6 +3131,34 @@ def mark_legal(jobs: list[dict]) -> None:
     print(f"Legal (law-student lane) roles: {total} jobs ({au} AU, {fit} law-student-friendly)")
 
 
+# Lightweight entry-level signal usable on ANY job (the strict classifier only runs on tax/legal/analyst/bookkeeping).
+ENTRY_WORDS = re.compile(
+    r"entry[- ]level|\bjunior\b|\btrainee\b|\bapprentice\b|fresh (grad|graduate)|recent (grad|graduate)|graduate program"
+    r"|newly (licensed|passed)|no (prior |previous |relevant )?experience (is )?(required|needed|necessary)"
+    r"|training (is |will be )?provided|we(?: will|'ll) train|willing to train|\b0\s*(?:-|to|–)\s*[12]\s*years?",
+    re.I)
+EXP_HARD = re.compile(
+    r"\b([3-9]|1[0-5])\+?\s*years?\b|experience (is )?(required|essential|a must|mandatory)|minimum[^.]{0,20}years",
+    re.I)
+
+
+def entry_signal(title: str, text: str) -> bool:
+    """True when a posting looks entry-level: an explicit entry cue and no hard experience requirement."""
+    if SENIOR_TITLE.search(title):
+        return False
+    blob = f"{title} {text}".lower()
+    return bool(ENTRY_WORDS.search(blob)) and not EXP_HARD.search(blob)
+
+
+def enrich_entry_and_busyness(jobs: list[dict]) -> None:
+    """Recompute busyness from the FULL posting (not just the short scrape) and label entry-level across all jobs."""
+    for j in jobs:
+        full = get_full_text(j) or j.get("description", "")
+        j["_busy"], j["_busy_label"] = busyness_rating(j["title"], full)
+        j["_entry_signal"] = bool(j.get("_entry")) or entry_signal(j["title"], full)
+    print(f"Entry-level (any lane): {sum(1 for j in jobs if j.get('_entry_signal'))} jobs")
+
+
 def mark_high_pay(jobs: list[dict]) -> None:
     """Flag jobs whose stated pay can reach HIGH_PAY_MIN_USD a month (top of the range)."""
     for j in jobs:
@@ -3391,6 +3419,7 @@ def _render_row(j: dict, new_ids: set[str], section: str = "") -> str:
     pt_badge = ""
     if any(k in text_lower for k in PT_KEYWORDS):
         pt_badge = '<span class="badge pt">Part-time</span> '
+    entry_badge = '<span class="badge entrylvl">Entry-level</span> ' if j.get("_entry_signal") else ""
 
     tags_html = ""
     if j.get("tags"):
@@ -3452,7 +3481,7 @@ def _render_row(j: dict, new_ids: set[str], section: str = "") -> str:
             <a href="{j['url']}" target="_blank" class="job-title">{j['title']}</a>
             {new_badge}
             <div class="company">{j['company']}</div>
-            <div style="margin-top:3px">{flex_badge}{pt_badge}</div>
+            <div style="margin-top:3px">{entry_badge}{flex_badge}{pt_badge}</div>
             {entry_html}
             <div class="desc">{desc_preview}</div>
             {tags_html}
@@ -3717,6 +3746,7 @@ tr.flex-row td:first-child {{ padding-left: 10px; }}
 .empty.small {{ padding: 16px; }}
 .ustax-table {{ border: 1px solid rgba(96, 165, 250, 0.45); }}
 .emp-rating {{ color: #fbbf24; font-size: 0.72rem; white-space: nowrap; }}
+.badge.entrylvl {{ background: rgba(74,222,128,0.18); color: #86efac; }}
 .legal-tag {{ margin-top: 3px; }}
 .badge.legal-badge {{ font-size: 0.68rem; }}
 .badge.lf-good {{ background: rgba(96,165,250,0.18); color: #93c5fd; }}
@@ -3819,6 +3849,7 @@ def main():
     mark_legal(jobs)
     mark_high_pay(jobs)
     enrich_employer_reviews(jobs)
+    enrich_entry_and_busyness(jobs)
     jobs = sort_jobs(jobs)
 
     new_ids = set()
