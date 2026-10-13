@@ -2870,6 +2870,8 @@ def role_category(title: str) -> str | None:
 ENTRY_ROLE_QUERIES = [
     "paralegal", "junior paralegal", "legal assistant", "legal researcher", "legal virtual assistant",
     "law clerk", "compliance analyst", "kyc analyst", "contract reviewer",
+    # AU legal pathway roles (entry into Australian legal work for a law student)
+    "australian legal assistant", "au paralegal", "conveyancing assistant", "legal assistant australia",
     "junior financial analyst", "financial analyst", "junior data analyst", "data analyst",
     "business analyst", "research analyst", "fp&a analyst", "credit analyst", "junior analyst",
 ]
@@ -3096,12 +3098,37 @@ ATTORNEY_TITLE = re.compile(r"\battorney\b|\blawyer\b|solicitor|barrister|\besq\
 
 
 def mark_legal(jobs: list[dict]) -> None:
-    """Flag legal support / paralegal roles -- a law-student lane. Surviving legal-category roles are already
-    restricted to lane-appropriate titles by mark_entry_level."""
+    """Flag legal support / paralegal roles -- a law-student lane -- and tag each by jurisdiction and whether it
+    fits a law student (entry-level/support) or needs foreign-law experience the user doesn't have."""
+    exp_required = re.compile(
+        r"experience (is )?(required|essential|a must|mandatory)|\b[2-9]\+?\s*years?\b[^.]{0,30}(legal|paralegal|conveyanc|law)"
+        r"|(australian?|\bau\b|us|u\.s\.|uk|british)\s+(?:[\w.-]+\s+){0,3}?(experience|law|paralegal|conveyanc\w*)\s+(required|essential|a must)",
+        re.I)
     for j in jobs:
-        if j.get("category") == "legal" or j.get("_entry_category") == "legal":
-            j["_legal"] = True
-    print(f"Legal (law-student lane) roles: {sum(1 for j in jobs if j.get('_legal'))} jobs")
+        if not (j.get("category") == "legal" or j.get("_entry_category") == "legal"):
+            continue
+        j["_legal"] = True
+        tl = f"{j['title']} {get_full_text(j) or j.get('description', '')}".lower()
+        juris = []
+        if re.search(r"australia|australian|conveyanc|\bpexa\b|\bvic\b|\bnsw\b|\bqld\b", tl):
+            juris.append("AU")
+        if re.search(r"new zealand|\bnz\b", tl):
+            juris.append("NZ")
+        if re.search(r"\bu\.?s\.?\b|united states|american|\bllc\b|estate planning|immigration|litigation", tl):
+            juris.append("US")
+        if re.search(r"\buk\b|united kingdom|solicitor|barrister|british", tl):
+            juris.append("UK")
+        j["_legal_juris"] = juris
+        if j.get("_entry") and j.get("_entry_category") == "legal":
+            j["_legal_fit"] = "entry"            # genuinely entry-level: fits a law student
+        elif exp_required.search(tl):
+            j["_legal_fit"] = "needs-exp"         # wants foreign-law experience the user lacks
+        else:
+            j["_legal_fit"] = "support"           # general legal support
+    total = sum(1 for j in jobs if j.get("_legal"))
+    au = sum(1 for j in jobs if j.get("_legal") and "AU" in (j.get("_legal_juris") or []))
+    fit = sum(1 for j in jobs if j.get("_legal") and j.get("_legal_fit") in ("entry", "support"))
+    print(f"Legal (law-student lane) roles: {total} jobs ({au} AU, {fit} law-student-friendly)")
 
 
 def mark_high_pay(jobs: list[dict]) -> None:
@@ -3334,6 +3361,12 @@ def _render_row(j: dict, new_ids: set[str], section: str = "") -> str:
         reason = html_escape(j.get("_entry_reason", ""))
         cat = ENTRY_CATEGORY_LABEL.get(j.get("_entry_category"), "")
         entry_html = f'<div class="entry-reason"><span class="badge entry-cat">{cat}</span> Why entry-level: {reason}</div>'
+    if j.get("_legal"):
+        juris = "/".join(j.get("_legal_juris") or []) or "?"
+        fit_label = {"entry": "law-student friendly", "support": "legal support",
+                     "needs-exp": "needs legal experience"}.get(j.get("_legal_fit"), "legal")
+        fit_cls = "lf-good" if j.get("_legal_fit") in ("entry", "support") else "lf-exp"
+        entry_html += f'<div class="legal-tag"><span class="badge legal-badge {fit_cls}">{juris} &middot; {fit_label}</span></div>'
     if j.get("_tz"):
         entry_html += f'<div class="tz-note">{j["_tz"]}: {j["_tz_hours"]}</div>'
     if j.get("_high_pay"):
@@ -3684,6 +3717,10 @@ tr.flex-row td:first-child {{ padding-left: 10px; }}
 .empty.small {{ padding: 16px; }}
 .ustax-table {{ border: 1px solid rgba(96, 165, 250, 0.45); }}
 .emp-rating {{ color: #fbbf24; font-size: 0.72rem; white-space: nowrap; }}
+.legal-tag {{ margin-top: 3px; }}
+.badge.legal-badge {{ font-size: 0.68rem; }}
+.badge.lf-good {{ background: rgba(96,165,250,0.18); color: #93c5fd; }}
+.badge.lf-exp {{ background: rgba(248,113,113,0.15); color: #fca5a5; }}
 .controls {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 6px; position: sticky; top: 0; z-index: 5; }}
 .controls input[type=text] {{ flex: 1 1 220px; min-width: 160px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; font-size: 0.85rem; }}
 .controls input[type=number] {{ width: 54px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 6px; margin: 0 4px; }}
