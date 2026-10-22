@@ -3161,13 +3161,31 @@ def entry_signal(title: str, text: str) -> bool:
     return bool(ENTRY_WORDS.search(blob)) and not EXP_HARD.search(blob)
 
 
+BENEFIT_PATTERNS = [
+    ("PTO/leave", r"paid time off|\bpto\b|paid leave|vacation leave|sick leave|annual leave|paid holidays|leave credits|service incentive leave|paid vacation"),
+    ("HMO/health", r"\bhmo\b|health insurance|medical insurance|health benefits|healthcare|health coverage|medical coverage"),
+    ("13th month", r"13th[- ]month|thirteenth month"),
+    ("bonuses", r"performance bonus|year[- ]end bonus|signing bonus|quarterly bonus|annual bonus"),
+    ("retirement", r"\b401\(?k\)?\b|retirement plan|\bpension\b|provident fund"),
+    ("gov't benefits", r"\bsss\b|pag[- ]?ibig|philhealth|government[- ]mandated benefits"),
+]
+
+
+def detect_benefits(title: str, text: str) -> list[str]:
+    """Which personal benefits the posting actually mentions (PTO, HMO, 13th month, etc.)."""
+    blob = f"{title} {text}".lower()
+    return [label for label, pat in BENEFIT_PATTERNS if re.search(pat, blob)]
+
+
 def enrich_entry_and_busyness(jobs: list[dict]) -> None:
-    """Recompute busyness from the FULL posting (not just the short scrape) and label entry-level across all jobs."""
+    """Recompute busyness from the FULL posting, label entry-level across all jobs, and flag personal benefits."""
     for j in jobs:
         full = get_full_text(j) or j.get("description", "")
         j["_busy"], j["_busy_label"] = busyness_rating(j["title"], full)
         j["_entry_signal"] = bool(j.get("_entry")) or entry_signal(j["title"], full)
+        j["_benefits"] = detect_benefits(j["title"], full)
     print(f"Entry-level (any lane): {sum(1 for j in jobs if j.get('_entry_signal'))} jobs")
+    print(f"Roles mentioning benefits: {sum(1 for j in jobs if j.get('_benefits'))} jobs")
 
 
 def mark_high_pay(jobs: list[dict]) -> None:
@@ -3431,6 +3449,8 @@ def _render_row(j: dict, new_ids: set[str], section: str = "") -> str:
     if any(k in text_lower for k in PT_KEYWORDS):
         pt_badge = '<span class="badge pt">Part-time</span> '
     entry_badge = '<span class="badge entrylvl">Entry-level</span> ' if j.get("_entry_signal") else ""
+    benefits = j.get("_benefits") or []
+    benefits_badge = f'<span class="badge benefits" title="Benefits mentioned in the posting">&#128153; {" &middot; ".join(benefits)}</span> ' if benefits else ""
 
     tags_html = ""
     if j.get("tags"):
@@ -3482,7 +3502,8 @@ def _render_row(j: dict, new_ids: set[str], section: str = "") -> str:
         row_classes.append("flex-row")
 
     jid = html_escape(str(j.get("_id", "")))
-    search_blob = html_escape(f"{j['title']} {j.get('company', '')} {j['source']}".lower())
+    ben = (" benefits " + " ".join(j.get("_benefits") or [])) if j.get("_benefits") else ""
+    search_blob = html_escape(f"{j['title']} {j.get('company', '')} {j['source']}{ben}".lower())
     src_attr = html_escape(j["source"])
     date_sort = int(j["date"].timestamp()) if j.get("date") else 0  # epoch so the Posted column sorts chronologically
     return f"""
@@ -3492,7 +3513,7 @@ def _render_row(j: dict, new_ids: set[str], section: str = "") -> str:
             <a href="{j['url']}" target="_blank" class="job-title">{j['title']}</a>
             {new_badge}
             <div class="company">{j['company']}</div>
-            <div style="margin-top:3px">{entry_badge}{flex_badge}{pt_badge}</div>
+            <div style="margin-top:3px">{entry_badge}{benefits_badge}{flex_badge}{pt_badge}</div>
             {entry_html}
             <div class="desc">{desc_preview}</div>
             {tags_html}
@@ -3761,6 +3782,7 @@ tr.flex-row td:first-child {{ padding-left: 10px; }}
 .ustax-table {{ border: 1px solid rgba(96, 165, 250, 0.45); }}
 .emp-rating {{ color: #fbbf24; font-size: 0.72rem; white-space: nowrap; }}
 .badge.entrylvl {{ background: rgba(74,222,128,0.18); color: #86efac; }}
+.badge.benefits {{ background: rgba(96,165,250,0.18); color: #93c5fd; }}
 .legal-tag {{ margin-top: 3px; }}
 .badge.legal-badge {{ font-size: 0.68rem; }}
 .badge.lf-good {{ background: rgba(96,165,250,0.18); color: #93c5fd; }}
