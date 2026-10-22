@@ -3177,6 +3177,36 @@ def detect_benefits(title: str, text: str) -> list[str]:
     return [label for label, pat in BENEFIT_PATTERNS if re.search(pat, blob)]
 
 
+# Job type, matched title-first then falling back to the body. Order is priority:
+# the first pattern that hits the title wins, so "Senior Tax Accountant" lands in Tax, not Accounting.
+JOBTYPE_PATTERNS = [
+    ("Tax", r"\btax\b|1040|1120|preparer|\bcpa firm\b|irs|sales tax"),
+    ("Bookkeeping", r"bookkeep|\bbas\b|\bgst\b|bank rec|reconcil|accounts clerk|xero|quickbooks|myob"),
+    ("Payroll", r"payroll|\bpaye\b|timesheet|wage"),
+    ("AP/AR", r"accounts payable|accounts receivable|\bap/ar\b|\bar/ap\b|\bap\b clerk|\bar\b clerk|billing|collections|invoic"),
+    ("Audit", r"audit|assurance|internal control"),
+    ("Accounting", r"account(ant|ing)|general ledger|month[- ]end|financial report|controller|\bgl\b"),
+    ("Finance/Analyst", r"financial analyst|\bfp&a\b|finance (analyst|specialist|manager|officer|associate)|financial model|\banalyst\b|forecast|budgeting"),
+    ("Legal", r"\blegal\b|paralegal|attorney|lawyer|\blaw\b|litigation|conveyanc|solicitor|compliance"),
+    ("Admin/VA", r"virtual assistant|\bva\b|admin(istrative)?|data entry|executive assistant|back[- ]office|clerk"),
+    ("Sales", r"\bsales\b|business development|account executive|\bsdr\b|\bbdr\b|lead generation|appointment setter"),
+    ("Customer support", r"customer (support|service|success)|help desk|support (agent|specialist)|\bcsr\b"),
+]
+
+
+def categorize_job(title: str, text: str) -> str:
+    """Best-guess single job type for the Type filter. Title wins over body."""
+    t = (title or "").lower()
+    for label, pat in JOBTYPE_PATTERNS:
+        if re.search(pat, t):
+            return label
+    blob = (text or "").lower()
+    for label, pat in JOBTYPE_PATTERNS:
+        if re.search(pat, blob):
+            return label
+    return "Other"
+
+
 def enrich_entry_and_busyness(jobs: list[dict]) -> None:
     """Recompute busyness from the FULL posting, label entry-level across all jobs, and flag personal benefits."""
     for j in jobs:
@@ -3184,6 +3214,7 @@ def enrich_entry_and_busyness(jobs: list[dict]) -> None:
         j["_busy"], j["_busy_label"] = busyness_rating(j["title"], full)
         j["_entry_signal"] = bool(j.get("_entry")) or entry_signal(j["title"], full)
         j["_benefits"] = detect_benefits(j["title"], full)
+        j["_jobtype"] = categorize_job(j["title"], full)
     print(f"Entry-level (any lane): {sum(1 for j in jobs if j.get('_entry_signal'))} jobs")
     print(f"Roles mentioning benefits: {sum(1 for j in jobs if j.get('_benefits'))} jobs")
 
@@ -3507,7 +3538,7 @@ def _render_row(j: dict, new_ids: set[str], section: str = "") -> str:
     src_attr = html_escape(j["source"])
     date_sort = int(j["date"].timestamp()) if j.get("date") else 0  # epoch so the Posted column sorts chronologically
     return f"""
-    <tr class="{' '.join(row_classes)}" data-id="{jid}" data-fit="{prob}" data-source="{src_attr}" data-section="{section}" data-search="{search_blob}" data-entry="{1 if j.get('_entry_signal') else 0}" data-benefits="{1 if benefits else 0}" data-flex="{1 if is_flex else 0}" data-rated="{1 if j.get('_employer_rating') else 0}" data-new="{1 if is_new else 0}" data-lanes="{(' '.join(t for t, on in (('us-tax', j.get('_us_tax')), ('aunz', j.get('_aunz')), ('legal', j.get('_legal'))) if on)) or ''}">
+    <tr class="{' '.join(row_classes)}" data-id="{jid}" data-fit="{prob}" data-source="{src_attr}" data-section="{section}" data-search="{search_blob}" data-entry="{1 if j.get('_entry_signal') else 0}" data-benefits="{1 if benefits else 0}" data-flex="{1 if is_flex else 0}" data-rated="{1 if j.get('_employer_rating') else 0}" data-new="{1 if is_new else 0}" data-lanes="{(' '.join(t for t, on in (('us-tax', j.get('_us_tax')), ('aunz', j.get('_aunz')), ('legal', j.get('_legal'))) if on)) or ''}" data-type="{j.get('_jobtype', 'Other')}">
         <td class="freshness" data-sort="{date_sort}">{freshness_label(j['date'])}</td>
         <td>
             <a href="{j['url']}" target="_blank" class="job-title">{j['title']}</a>
@@ -3554,6 +3585,7 @@ def render_html(jobs: list[dict], new_ids: set[str], stats: dict) -> str:
   <input id="f-search" type="text" placeholder="Search title, company or source…" oninput="applyFilters()">
   <label class="fctl">Min Fit <input id="f-fit" type="number" min="0" max="100" value="0" oninput="applyFilters()">%</label>
   <select id="f-source" onchange="applyFilters()"><option value="">All sources</option></select>
+  <select id="f-type" onchange="applyFilters()"><option value="">All job types</option></select>
   <select id="f-section" onchange="applyFilters()">
     <option value="">All sections</option>
     <option value="apply-list">Apply-list</option>
@@ -3604,6 +3636,7 @@ function clearFilters(){
   document.getElementById('f-search').value = '';
   document.getElementById('f-fit').value = '0';
   document.getElementById('f-source').value = '';
+  document.getElementById('f-type').value = '';
   document.getElementById('f-section').value = '';
   document.getElementById('f-hideapplied').checked = false;
   document.querySelectorAll('.chip').forEach(function(b){ b.classList.remove('active'); });
@@ -3613,6 +3646,7 @@ function applyFilters(){
   const q = (document.getElementById('f-search').value || '').toLowerCase().trim();
   const minFit = parseInt(document.getElementById('f-fit').value || '0', 10) || 0;
   const src = document.getElementById('f-source').value;
+  const typ = document.getElementById('f-type').value;
   const sec = document.getElementById('f-section').value;
   const hideMarked = document.getElementById('f-hideapplied').checked;
   const flags = Array.from(document.querySelectorAll('.chip[data-flag].active')).map(function(b){ return b.getAttribute('data-flag'); });
@@ -3628,6 +3662,7 @@ function applyFilters(){
     if (q && (tr.getAttribute('data-search') || '').indexOf(q) === -1) ok = false;
     if (ok && (parseInt(tr.getAttribute('data-fit') || '0', 10) < minFit)) ok = false;
     if (ok && src && tr.getAttribute('data-source') !== src) ok = false;
+    if (ok && typ && tr.getAttribute('data-type') !== typ) ok = false;
     if (ok && sec && tr.getAttribute('data-section') !== sec) ok = false;
     if (ok && hideMarked && mark) ok = false;
     if (ok) { for (let i = 0; i < flags.length; i++){ if (tr.getAttribute('data-' + flags[i]) !== '1'){ ok = false; break; } } }
@@ -3638,14 +3673,15 @@ function applyFilters(){
   const c = document.getElementById('f-count');
   if (c) c.textContent = shown + ' shown';
 }
-function initSources(){
-  const sel = document.getElementById('f-source');
+function initSelect(selId, attr){
+  const sel = document.getElementById(selId);
   const set = new Set();
-  document.querySelectorAll('tr[data-id]').forEach(function(tr){ set.add(tr.getAttribute('data-source')); });
+  document.querySelectorAll('tr[data-id]').forEach(function(tr){ set.add(tr.getAttribute(attr)); });
   Array.from(set).filter(Boolean).sort().forEach(function(s){
     const o = document.createElement('option'); o.value = s; o.textContent = s; sel.appendChild(o);
   });
 }
+function initSources(){ initSelect('f-source', 'data-source'); initSelect('f-type', 'data-type'); }
 function cellVal(tr, i){
   const td = tr.children[i]; if (!td) return '';
   const ds = td.getAttribute('data-sort'); if (ds !== null) return parseFloat(ds);
