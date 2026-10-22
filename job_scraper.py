@@ -2874,8 +2874,12 @@ ENTRY_ROLE_QUERIES = [
     "australian legal assistant", "au paralegal", "conveyancing assistant", "legal assistant australia",
     "junior financial analyst", "financial analyst", "junior data analyst", "data analyst",
     "business analyst", "research analyst", "fp&a analyst", "credit analyst", "junior analyst",
+    # entry accounting-adjacent roles the user (a CPA) has a real chance at
+    "junior accountant", "accounting assistant", "accounting clerk", "audit assistant",
+    "finance assistant", "accounts payable specialist", "accounts receivable specialist", "billing specialist",
 ]
-ENTRY_ROLE_QUERIES_INDEED = ["paralegal", "legal assistant", "compliance analyst", "junior financial analyst", "data analyst", "junior analyst"]
+ENTRY_ROLE_QUERIES_INDEED = ["paralegal", "legal assistant", "compliance analyst", "junior financial analyst",
+                             "data analyst", "junior analyst", "junior accountant", "accounting clerk", "audit assistant"]
 
 
 def scrape_entry_roles() -> list[dict]:
@@ -3139,6 +3143,13 @@ ENTRY_WORDS = re.compile(
     re.I)
 EXP_HARD = re.compile(
     r"\b([3-9]|1[0-5])\+?\s*years?\b|experience (is )?(required|essential|a must|mandatory)|minimum[^.]{0,20}years",
+    re.I)
+
+
+# Roles the user (CPA + audit + law student) has a realistic chance at -- the entry-level section's scope.
+WHEELHOUSE = re.compile(
+    r"bookkeep|account|\baccounts\b|accounts payable|accounts receivable|\bap/ar\b|payroll|billing|collections"
+    r"|invoic|reconcil|ledger|\btax\b|audit|finance|financial|fp&a|\banalyst\b|paralegal|legal|compliance|\bkyc\b",
     re.I)
 
 
@@ -3501,13 +3512,16 @@ def render_html(jobs: list[dict], new_ids: set[str], stats: dict) -> str:
     # Your apply-list: the two target types (US tax + AU/NZ bookkeeping), surfaced at the very top.
     def in_applylist(j):
         return j.get("_us_tax") or j.get("_aunz") or j.get("_legal")
+    # Entry-level you have a chance at: any entry-level role in the user's wheelhouse, beyond the three lanes.
+    def in_entry(j):
+        return j.get("_entry_signal") and WHEELHOUSE.search(j["title"]) and not in_applylist(j) and not j.get("_high_pay")
     apply_rows = [_render_row(j, new_ids, "apply-list") for j in jobs if in_applylist(j)]
-    entry_rows = [_render_row(j, new_ids, "entry-level") for j in jobs if j.get("_entry") and not in_applylist(j)]
-    high_jobs = sorted((j for j in jobs if j.get("_high_pay") and not j.get("_entry") and not in_applylist(j)),
+    entry_rows = [_render_row(j, new_ids, "entry-level") for j in jobs if in_entry(j)]
+    high_jobs = sorted((j for j in jobs if j.get("_high_pay") and not in_applylist(j)),
                        key=lambda j: j["_pay_usd"], reverse=True)
     high_rows = [_render_row(j, new_ids, "high-pay") for j in high_jobs]
     rows = [_render_row(j, new_ids, "other") for j in jobs
-            if not j.get("_entry") and not in_applylist(j) and not j.get("_high_pay")]
+            if not in_entry(j) and not in_applylist(j) and not j.get("_high_pay")]
 
     source_summary = ", ".join(
         f"{name}: {count}" for name, count in sorted(stats["per_source"].items())
@@ -3792,8 +3806,8 @@ th {{ user-select: none; }}
 <h2 class="section-title">&#127919; Your apply-list: US tax + AU/NZ + legal (apply this week) <span class="section-count">{len(apply_rows)}</span></h2>
 <div class="section-note">Your target role types, surfaced together &mdash; <strong>US tax</strong> postings that don't require US experience you lack, <strong>AU/NZ Xero/bookkeeping</strong> (your fastest-hire fit), and <strong>legal support / paralegal</strong> roles (a law-student lane). Flexible/part-time surfaced higher. Apply within 1&ndash;2 days; match the CV to the role.</div>
 {"<table class='ustax-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(apply_rows) + "</tbody></table>" if apply_rows else '<div class="empty small">No US tax or AU/NZ roles cleared the filters today.</div>'}
-<h2 class="section-title">&#11088; Easiest to get hired: genuine entry-level <span class="section-count">{len(entry_rows)}</span></h2>
-<div class="section-note">Your highest-chance roles &mdash; bookkeeping, accounting, tax, legal &amp; analyst postings whose full text asks for <em>no prior experience</em> (training provided, junior/trainee, or 0&ndash;2 years). Highest Fit %% first. Each row says why it qualified.</div>
+<h2 class="section-title">&#11088; Entry-level you have a chance at <span class="section-count">{len(entry_rows)}</span></h2>
+<div class="section-note">Entry-level roles across your wheelhouse &mdash; accounting, bookkeeping, tax, audit, AP/AR, payroll, finance, analyst, legal &mdash; that advertise <em>no prior experience</em> (training provided, junior/trainee, or 0&ndash;2 years). Beyond your three apply-list lanes. Highest Fit %% first.</div>
 {"<table class='entry-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(entry_rows) + "</tbody></table>" if entry_rows else '<div class="empty small">No genuine entry-level roles today.</div>'}
 <h2 class="section-title">High pay: ${HIGH_PAY_MIN_USD:,}+ a month <span class="section-count">{len(high_rows)}</span></h2>
 <div class="section-note">Remote roles you can apply to from the Philippines whose stated pay can reach ${HIGH_PAY_MIN_USD:,} a month, highest first. Hourly rates assume full-time unless the posting gives weekly hours.</div>
