@@ -3507,7 +3507,7 @@ def _render_row(j: dict, new_ids: set[str], section: str = "") -> str:
     src_attr = html_escape(j["source"])
     date_sort = int(j["date"].timestamp()) if j.get("date") else 0  # epoch so the Posted column sorts chronologically
     return f"""
-    <tr class="{' '.join(row_classes)}" data-id="{jid}" data-fit="{prob}" data-source="{src_attr}" data-section="{section}" data-search="{search_blob}">
+    <tr class="{' '.join(row_classes)}" data-id="{jid}" data-fit="{prob}" data-source="{src_attr}" data-section="{section}" data-search="{search_blob}" data-entry="{1 if j.get('_entry_signal') else 0}" data-benefits="{1 if benefits else 0}" data-flex="{1 if is_flex else 0}" data-rated="{1 if j.get('_employer_rating') else 0}" data-new="{1 if is_new else 0}" data-lanes="{(' '.join(t for t, on in (('us-tax', j.get('_us_tax')), ('aunz', j.get('_aunz')), ('legal', j.get('_legal'))) if on)) or ''}">
         <td class="freshness" data-sort="{date_sort}">{freshness_label(j['date'])}</td>
         <td>
             <a href="{j['url']}" target="_blank" class="job-title">{j['title']}</a>
@@ -3563,9 +3563,23 @@ def render_html(jobs: list[dict], new_ids: set[str], stats: dict) -> str:
   </select>
   <label class="fctl"><input id="f-hideapplied" type="checkbox" onchange="applyFilters()"> Hide applied/hidden</label>
   <button type="button" class="ctl" onclick="resetMarks()">Reset marks</button>
+  <button type="button" class="ctl" onclick="clearFilters()">Clear filters</button>
   <span id="f-count" class="fcount"></span>
 </div>
-<div class="hint">Tip: click a column header to sort. Mark rows &#10003; applied or &#10005; hide &mdash; marks persist on this device.</div>"""
+<div class="controls chips">
+  <span class="chip-label">Quick filters:</span>
+  <button type="button" class="chip" data-flag="entry" onclick="toggleChip(this)">&#11088; Entry-level</button>
+  <button type="button" class="chip" data-flag="benefits" onclick="toggleChip(this)">&#128153; Has benefits</button>
+  <button type="button" class="chip" data-flag="flex" onclick="toggleChip(this)">&#9201; Flexible / part-time</button>
+  <button type="button" class="chip" data-flag="rated" onclick="toggleChip(this)">&#9733; Rated employer</button>
+  <button type="button" class="chip" data-flag="new" onclick="toggleChip(this)">&#128293; New today</button>
+  <span class="chip-sep">&middot;</span>
+  <span class="chip-label">Lane:</span>
+  <button type="button" class="chip" data-lane="us-tax" onclick="toggleLane(this)">US tax</button>
+  <button type="button" class="chip" data-lane="aunz" onclick="toggleLane(this)">AU/NZ books</button>
+  <button type="button" class="chip" data-lane="legal" onclick="toggleLane(this)">Legal</button>
+</div>
+<div class="hint">Tip: click a column header to sort. Quick filters stack with the search box &mdash; click a chip again to turn it off. Mark rows &#10003; applied or &#10005; hide &mdash; marks persist on this device.</div>"""
 
     filter_js = """
 <script>
@@ -3578,12 +3592,32 @@ function jobMark(id, state){
   saveMarks(marks); applyFilters();
 }
 function resetMarks(){ marks = {}; saveMarks(marks); applyFilters(); }
+function toggleChip(btn){ btn.classList.toggle('active'); applyFilters(); }
+function toggleLane(btn){
+  // Lanes are mutually inclusive but exclusive of each other as a quick jump: clicking one clears the others.
+  const on = btn.classList.contains('active');
+  document.querySelectorAll('.chip[data-lane]').forEach(function(b){ b.classList.remove('active'); });
+  if (!on) btn.classList.add('active');
+  applyFilters();
+}
+function clearFilters(){
+  document.getElementById('f-search').value = '';
+  document.getElementById('f-fit').value = '0';
+  document.getElementById('f-source').value = '';
+  document.getElementById('f-section').value = '';
+  document.getElementById('f-hideapplied').checked = false;
+  document.querySelectorAll('.chip').forEach(function(b){ b.classList.remove('active'); });
+  applyFilters();
+}
 function applyFilters(){
   const q = (document.getElementById('f-search').value || '').toLowerCase().trim();
   const minFit = parseInt(document.getElementById('f-fit').value || '0', 10) || 0;
   const src = document.getElementById('f-source').value;
   const sec = document.getElementById('f-section').value;
   const hideMarked = document.getElementById('f-hideapplied').checked;
+  const flags = Array.from(document.querySelectorAll('.chip[data-flag].active')).map(function(b){ return b.getAttribute('data-flag'); });
+  const laneBtn = document.querySelector('.chip[data-lane].active');
+  const lane = laneBtn ? laneBtn.getAttribute('data-lane') : '';
   let shown = 0;
   document.querySelectorAll('tr[data-id]').forEach(function(tr){
     const id = tr.getAttribute('data-id');
@@ -3596,6 +3630,8 @@ function applyFilters(){
     if (ok && src && tr.getAttribute('data-source') !== src) ok = false;
     if (ok && sec && tr.getAttribute('data-section') !== sec) ok = false;
     if (ok && hideMarked && mark) ok = false;
+    if (ok) { for (let i = 0; i < flags.length; i++){ if (tr.getAttribute('data-' + flags[i]) !== '1'){ ok = false; break; } } }
+    if (ok && lane && (' ' + (tr.getAttribute('data-lanes') || '') + ' ').indexOf(' ' + lane + ' ') === -1) ok = false;
     tr.style.display = ok ? '' : 'none';
     if (ok) shown++;
   });
@@ -3799,6 +3835,12 @@ tr.flex-row td:first-child {{ padding-left: 10px; }}
 .rowctl {{ margin-top: 6px; display: flex; gap: 6px; }}
 .ctl-applied:hover {{ color: var(--green); border-color: var(--green); }}
 .ctl-hide:hover {{ color: var(--red); border-color: var(--red); }}
+.controls.chips {{ position: static; margin-top: -2px; margin-bottom: 8px; padding: 8px 12px; }}
+.chip-label {{ font-size: 0.75rem; color: var(--text-muted); font-weight: 600; }}
+.chip-sep {{ color: var(--border); margin: 0 2px; }}
+.chip {{ background: var(--bg); color: var(--text-muted); border: 1px solid var(--border); border-radius: 999px; padding: 5px 11px; font-size: 0.78rem; cursor: pointer; transition: all .12s; }}
+.chip:hover {{ color: var(--text); border-color: var(--accent); }}
+.chip.active {{ background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }}
 tr.row-applied {{ opacity: 0.55; }}
 tr.row-applied .job-title::after {{ content: " \\2713"; color: var(--green); }}
 tr.row-hidden {{ opacity: 0.4; }}
