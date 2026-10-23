@@ -3406,19 +3406,30 @@ def _gov_field(text: str, label: str, nxt: str) -> str:
     return re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
 
 
-def _gov_eligibility_fit(elig: str) -> tuple[str, bool]:
-    """Map a CSC eligibility requirement to how John (CPA, law student, not yet a lawyer) fits."""
+def _gov_eligibility_fit(elig: str, title: str = "", wheelhouse: bool = True) -> tuple[str, bool]:
+    """Map a CSC eligibility requirement to how John (CPA, law student, not yet a lawyer) fits.
+    `wheelhouse` is whether the role is in his field (legal/accounting/admin); outside it, an
+    R.A. 1080 board requirement is for a profession he doesn't hold, so he wouldn't qualify."""
     e = elig.lower()
-    if "1080" in e and ("cpa" in e or "accountant" in e):
+    if "1080" in e and ("cpa" in e or "accountant" in e or "accounting" in title.lower()):
         return "✓ CPA-eligible — you qualify", True
-    if "1080" in e and "bar" in e:
-        return "Needs bar passage — not yet (you're still a law student)", False
+    if "1080" in e and ("bar" in e or re.search(r"attorney|prosecut|legal officer", title, re.I)):
+        return "Needs bar passage — not yet (you're a law student)", False
+    if "1080" in e and not wheelhouse:
+        return "Needs a professional board licence for this field — not your profession", False
     if "sub-professional" in e or "sub professional" in e or "first level" in e:
-        return "Needs Career Service Sub-Professional eligibility", True
+        txt = ("Needs Career Service Sub-Professional eligibility (you can take the exam)"
+               if wheelhouse else "Outside your field — needs CS Sub-Professional eligibility")
+        return txt, wheelhouse
     if "professional" in e or "second level" in e:
-        return "Needs Career Service Professional eligibility", True
+        txt = ("Needs Career Service Professional eligibility (you can take the exam)"
+               if wheelhouse else "Outside your field — needs CS Professional eligibility")
+        return txt, wheelhouse
     if "none" in e or "mc 11" in e or "not required" in e or "no eligibility" in e:
-        return "No eligibility exam required", True
+        return ("No eligibility exam required — you qualify" if wheelhouse
+                else "Outside your field (no eligibility exam needed)"), wheelhouse
+    if not wheelhouse:
+        return f"Outside your field — eligibility: {elig or 'see posting'}", False
     return (elig or "See posting for eligibility"), True
 
 
@@ -3485,8 +3496,6 @@ def scrape_govjobs_dumaguete() -> list[dict]:
             if not t:
                 continue
             title = t.group(2).strip()
-            if not _gov_wheelhouse_ok(title):
-                continue  # keep only legal / accounting-finance / general-admin roles John can hold
             url = t.group(1)
             if url not in candidates:
                 candidates[url] = {
@@ -3514,10 +3523,9 @@ def scrape_govjobs_dumaguete() -> list[dict]:
                 continue  # posting is older than the government freshness window
         days_old = (datetime.now(timezone.utc) - posted).days if posted else None
         stale = days_old is not None and days_old > GOV_STALE_DAYS
-        fit_text, qualifies = _gov_eligibility_fit(det.get("eligibility", ""))
         position = det.get("position") or c["title"]
-        if not _gov_wheelhouse_ok(position):
-            continue  # detail-page title can differ from the card; re-check
+        wheelhouse = _gov_wheelhouse_ok(position)
+        fit_text, qualifies = _gov_eligibility_fit(det.get("eligibility", ""), position, wheelhouse)
         is_legal = bool(GOV_LEGAL_RE.search(f"{position} {place}"))
         bits = [f"Place of Assignment: {place}."]
         if det.get("grade") or det.get("monthly"):
@@ -3544,14 +3552,15 @@ def scrape_govjobs_dumaguete() -> list[dict]:
             "_gov_eligibility": det.get("eligibility", ""),
             "_gov_fit": fit_text,
             "_gov_qualifies": qualifies,
+            "_gov_wheelhouse": wheelhouse,
             "_gov_legal": is_legal,
             "_gov_verify_loc": verify,
             "_gov_days_old": days_old,
             "_gov_stale": stale,
         })
-    # fresh first, then legal (his priority), then roles he already qualifies for
+    # fresh first, then legal (his priority), then in-field, then roles he already qualifies for
     jobs.sort(key=lambda j: (not j.get("_gov_stale", False), j.get("_gov_legal", False),
-                             j.get("_gov_qualifies", False)), reverse=True)
+                             j.get("_gov_wheelhouse", False), j.get("_gov_qualifies", False)), reverse=True)
     return jobs
 
 
@@ -4198,7 +4207,7 @@ th {{ user-select: none; }}
 </div>
 {controls_html}
 <h2 class="section-title">&#127963;&#65039; Dumaguete government jobs (legal &amp; CPA first) <span class="section-count">{len(gov_rows)}</span></h2>
-<div class="section-note">On-site Philippine government posts with a Dumaguete-City duty station, your wheelhouse only &mdash; legal, accounting/audit, admin &mdash; each showing the <strong>eligibility</strong> you'd need and whether you qualify. The mirror (govjobs.ph) <strong>does not carry the closing date</strong> &mdash; only the <a href="https://csc.gov.ph/career" target="_blank">CSC Job Portal</a> does &mdash; so I only show postings from the <strong>last 3 weeks</strong> (a typical CSC window) and you should still confirm the deadline on CSC. The live CSC portal blocks this server; run the scraper on your Mac to read real closing dates.</div>
+<div class="section-note"><strong>Any</strong> government job with a Dumaguete-City duty station &mdash; legal and in-field roles (accounting/audit/admin) first and marked <span style="color:#86efac">&#10003; you qualify</span>, other fields shown below them. Each lists the <strong>eligibility</strong> you'd need. The mirror (govjobs.ph) <strong>does not carry the closing date</strong> &mdash; only the <a href="https://csc.gov.ph/career" target="_blank">CSC Job Portal</a> does &mdash; so I only show postings from the <strong>last 3 weeks</strong> (a typical CSC window); confirm the deadline on CSC. The live portal blocks this server; run the scraper on your Mac for real closing dates.</div>
 {"<table class='gov-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(gov_rows) + "</tbody></table>" if gov_rows else '<div class="empty small">No open Dumaguete government postings in the mirror right now (closed ones are hidden). A fresh legal or CPA vacancy will appear here automatically &mdash; or run on your Mac to read the live CSC portal with real closing dates.</div>'}
 <h2 class="section-title">&#127919; Your apply-list: US tax + AU/NZ + legal (apply this week) <span class="section-count">{len(apply_rows)}</span></h2>
 <div class="section-note">Your target role types, surfaced together &mdash; <strong>US tax</strong> postings that don't require US experience you lack, <strong>AU/NZ Xero/bookkeeping</strong> (your fastest-hire fit), and <strong>legal support / paralegal</strong> roles (a law-student lane). Flexible/part-time surfaced higher. Apply within 1&ndash;2 days; match the CV to the role.</div>
