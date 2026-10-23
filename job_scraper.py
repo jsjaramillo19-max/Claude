@@ -3153,12 +3153,22 @@ WHEELHOUSE = re.compile(
     re.I)
 
 
+# Negated entry cues: "this is NOT an entry-level position", "beyond entry level", etc.
+# We strip these before matching so a posting that rules entry-level OUT isn't flagged as entry-level.
+NEG_ENTRY = re.compile(r"\b(?:not|non|never|beyond|above|past|isn'?t|rather than|more than)\b[\s\w,'-]{0,18}?(?:entry[\s-]level|junior|trainee)", re.I)
+
+
 def entry_signal(title: str, text: str) -> bool:
     """True when a posting looks entry-level: an explicit entry cue and no hard experience requirement."""
     if SENIOR_TITLE.search(title):
         return False
     blob = f"{title} {text}".lower()
-    return bool(ENTRY_WORDS.search(blob)) and not EXP_HARD.search(blob)
+    # drop negated entry phrases ("not an entry-level role") so the negation isn't read as a positive cue
+    blob = NEG_ENTRY.sub(" ", blob)
+    # for the experience check, neutralise "no/without experience required" so that positive cue
+    # isn't misread as a hard requirement by the "experience required" branch of EXP_HARD
+    exp_blob = re.sub(r"\b(?:no|without|not|minimal|little|zero)\b[\s\w,'-]{0,14}?experience", " ", blob)
+    return bool(ENTRY_WORDS.search(blob)) and not EXP_HARD.search(exp_blob)
 
 
 BENEFIT_PATTERNS = [
