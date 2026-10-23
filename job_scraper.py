@@ -3365,6 +3365,193 @@ def mark_entry_level(jobs: list[dict]) -> list[dict]:
     return kept
 
 
+# ── PH government jobs (Dumaguete City) ─────────────────────────────────
+# Source: govjobs.ph, a mirror of the official CSC Job Portal (csc.gov.ph/career,
+# which hard-blocks this cloud server; it works when the scraper is run locally).
+# We read each posting's "Place of Assignment" to keep only Dumaguete-City duty
+# stations (the location tag on the card is where HQ filed it, not the duty station).
+GOV_SEARCH_TERMS = [
+    "dumaguete", "negros oriental", "negros oriental legal", "negros oriental accountant",
+]
+# Other Negros Oriental towns/cities: a posting naming one of these is NOT Dumaguete.
+GOV_OTHER_NEGOR_TOWNS = re.compile(
+    r"\b(bayawan|tanjay|bais|canlaon|guihulngan|dauin|siaton|sibulan|valencia|bacong|"
+    r"zamboanguita|basay|santa catalina|pamplona|amlan|ayungon|bindoy|jimalalud|"
+    r"la libertad|mabinay|manjuyod|tayasan|vallehermoso|san jose|dumaguete city hall)\b",
+    re.I)
+GOV_LEGAL_RE = re.compile(r"\b(legal|paralegal|prosecut|attorney|court|litigation|clerk of court|law )\b", re.I)
+# Roles John (CPA + law student + general admin) can realistically hold...
+GOV_WHEELHOUSE = re.compile(
+    r"legal|paralegal|attorney|prosecut|court|stenograph|account|audit|bookkeep|\btax\b|treasur|"
+    r"budget|financ|revenue|cashier|administrative|\badmin\b|\bclerk\b|records|storekeeper|"
+    r"human resource|\bhr\b|data (encoder|entry)|management (analyst|officer)", re.I)
+# ...minus professions that need a degree/board he doesn't have.
+GOV_EXCLUDE_PROF = re.compile(
+    r"engineer|architect|nurse|physician|\bdoctor\b|cartograph|science research|agrarian|technologist|"
+    r"veterinar|forester|chemist|geolog|teacher|professor|dentist|pharmacist|agricultur|statistician|"
+    r"econom|information (systems|technology)|computer|programmer|\bit\b|nutrition|midwife|social worker", re.I)
+GOV_MAX_AGE_DAYS = 150   # show the latest handful (gov vacancies are rare) ...
+GOV_STALE_DAYS = 25      # ... but flag anything past a typical CSC application window as likely closed
+
+
+def _gov_wheelhouse_ok(title: str) -> bool:
+    return bool(GOV_WHEELHOUSE.search(title)) and not GOV_EXCLUDE_PROF.search(title)
+
+
+def _gov_field(text: str, label: str, nxt: str) -> str:
+    m = re.search(re.escape(label) + r"\s*:?\s*(.*?)\s*(?=" + nxt + ")", text, re.I)
+    return re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
+
+
+def _gov_eligibility_fit(elig: str) -> tuple[str, bool]:
+    """Map a CSC eligibility requirement to how John (CPA, law student, not yet a lawyer) fits."""
+    e = elig.lower()
+    if "1080" in e and ("cpa" in e or "accountant" in e):
+        return "✓ CPA-eligible — you qualify", True
+    if "1080" in e and "bar" in e:
+        return "Needs bar passage — not yet (you're still a law student)", False
+    if "sub-professional" in e or "sub professional" in e or "first level" in e:
+        return "Needs Career Service Sub-Professional eligibility", True
+    if "professional" in e or "second level" in e:
+        return "Needs Career Service Professional eligibility", True
+    if "none" in e or "mc 11" in e or "not required" in e or "no eligibility" in e:
+        return "No eligibility exam required", True
+    return (elig or "See posting for eligibility"), True
+
+
+def _gov_fetch_detail(url: str) -> dict:
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        if r.status_code != 200:
+            return {}
+    except Exception:
+        return {}
+    text = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", r.text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = (text.replace("&#8217;", "'").replace("&amp;", "&").replace("&hellip;", "...")
+                .replace("&#8211;", "-").replace("&nbsp;", " "))
+    text = re.sub(r"\s+", " ", text).strip()
+    pa = _gov_field(text, "Place of Assignment", r"Position Title|Plantilla|Salary")
+    return {
+        "place": pa,
+        "position": _gov_field(text, "Position Title", r"Plantilla|Salary|Monthly"),
+        "grade": _gov_field(text, "Salary/Job/Pay Grade", r"Monthly|Eligibility"),
+        "monthly": _gov_field(text, "Monthly Salary", r"Eligibility|Education|Place"),
+        "eligibility": _gov_field(text, "Eligibility", r"Education|Experience|Training"),
+        "education": _gov_field(text, "Education", r"Experience|Training|Competency|Apply|Deadline|How to|$"),
+    }
+
+
+def _gov_in_dumaguete(place: str) -> tuple[bool, bool]:
+    """(include?, needs-location-verify?) given a posting's Place of Assignment."""
+    p = place.lower()
+    if "occidental" in p or "bacolod" in p:
+        return False, False
+    if "dumaguete" in p:
+        return True, False
+    # province-level Negros Oriental posting: the provincial/regional office sits in Dumaguete (the
+    # capital), so include it but flag for verification -- unless it names another Negros Oriental town.
+    if "negros oriental" in p and not GOV_OTHER_NEGOR_TOWNS.search(p):
+        return True, True
+    return False, False
+
+
+def scrape_govjobs_dumaguete() -> list[dict]:
+    """Dumaguete-City government vacancies (CSC mirror), prioritising roles John can qualify for."""
+    # 1) collect unique candidate postings from the location searches (cards precede the padding block)
+    candidates = {}
+    for i, term in enumerate(GOV_SEARCH_TERMS):
+        if i:
+            time.sleep(1.2)  # be polite to the mirror; it throttles rapid hits
+        try:
+            r = requests.get("https://govjobs.ph/", params={"s": term}, headers=HEADERS, timeout=45)
+            if r.status_code != 200:
+                continue
+        except Exception as e:
+            print(f"  [Govt] search '{term}' error: {e}")
+            continue
+        html = r.text
+        cut = re.search(r"might be applicable", html, re.I)
+        if cut:
+            html = html[:cut.start()]  # drop the "might be applicable to you" padding block
+        for m in re.finditer(r'<article class="post post-layout[^"]*">', html):
+            seg = html[m.end():m.end() + 1400]
+            t = re.search(r'class="entry-title">\s*<a href="([^"]+)">([^<]+)</a>', seg)
+            d = re.search(r'class="entry-date"[^>]*>(?:<[^>]+>)*\s*([A-Z][a-z]+ \d{1,2}, \d{4})', seg)
+            ag = re.search(r'job_listing_type-([a-z0-9-]+?)-careers', m.group(0))
+            if not t:
+                continue
+            title = t.group(2).strip()
+            if not _gov_wheelhouse_ok(title):
+                continue  # keep only legal / accounting-finance / general-admin roles John can hold
+            url = t.group(1)
+            if url not in candidates:
+                candidates[url] = {
+                    "title": title,
+                    "date_raw": d.group(1) if d else "",
+                    "agency": (ag.group(1).upper().replace("-", " ") if ag else ""),
+                }
+    # 2) read each candidate's detail page and keep only Dumaguete-City duty stations
+    jobs = []
+    for n, (url, c) in enumerate(candidates.items()):
+        if n:
+            time.sleep(0.8)
+        det = _gov_fetch_detail(url)
+        place = det.get("place", "")
+        if not place:
+            continue
+        include, verify = _gov_in_dumaguete(place)
+        if not include:
+            continue
+        posted = parse_date_fuzzy(c["date_raw"]) if c["date_raw"] else None
+        if posted:
+            if posted.tzinfo is None:
+                posted = posted.replace(tzinfo=timezone.utc)
+            if posted < datetime.now(timezone.utc) - timedelta(days=GOV_MAX_AGE_DAYS):
+                continue  # posting is older than the government freshness window
+        days_old = (datetime.now(timezone.utc) - posted).days if posted else None
+        stale = days_old is not None and days_old > GOV_STALE_DAYS
+        fit_text, qualifies = _gov_eligibility_fit(det.get("eligibility", ""))
+        position = det.get("position") or c["title"]
+        if not _gov_wheelhouse_ok(position):
+            continue  # detail-page title can differ from the card; re-check
+        is_legal = bool(GOV_LEGAL_RE.search(f"{position} {place}"))
+        bits = [f"Place of Assignment: {place}."]
+        if det.get("grade") or det.get("monthly"):
+            bits.append(f"Salary Grade {det.get('grade','?')} — {det.get('monthly','') or 'see posting'}.")
+        if det.get("eligibility"):
+            bits.append(f"Eligibility: {det['eligibility']}.")
+        if det.get("education"):
+            bits.append(f"Education: {det['education']}.")
+        desc = " ".join(bits)
+        jobs.append({
+            "title": position,
+            "company": c["agency"] or "Philippine government",
+            "url": url,
+            "location": "Dumaguete City" + (" (provincial office — verify)" if verify else ""),
+            "date_raw": c["date_raw"],
+            "date": posted,
+            "description": desc,
+            "tags": ["government", "Dumaguete"],
+            "source": "Govt · Dumaguete",
+            "_govt": True,
+            "_full_text": desc,
+            "_gov_grade": det.get("grade", ""),
+            "_gov_monthly": det.get("monthly", ""),
+            "_gov_eligibility": det.get("eligibility", ""),
+            "_gov_fit": fit_text,
+            "_gov_qualifies": qualifies,
+            "_gov_legal": is_legal,
+            "_gov_verify_loc": verify,
+            "_gov_days_old": days_old,
+            "_gov_stale": stale,
+        })
+    # fresh first, then legal (his priority), then roles he already qualifies for
+    jobs.sort(key=lambda j: (not j.get("_gov_stale", False), j.get("_gov_legal", False),
+                             j.get("_gov_qualifies", False)), reverse=True)
+    return jobs
+
+
 # ── Pipeline ────────────────────────────────────────────────────────────
 
 SCRAPERS = [
@@ -3400,6 +3587,7 @@ SCRAPERS = [
     ("jobdataapi", scrape_jobdataapi),
     ("Jobsora PH", scrape_jobsora),
     ("Entry-level legal & analyst", scrape_entry_roles),
+    ("Govt · Dumaguete", scrape_govjobs_dumaguete),
 ]
 
 
@@ -3523,6 +3711,20 @@ def _render_row(j: dict, new_ids: set[str], section: str = "") -> str:
         lo, hi = j["_pay_usd"]
         usd = f"${lo:,}" if lo == hi else f"${lo:,} to ${hi:,}"
         entry_html += f'<div class="high-pay">About {usd} a month</div>'
+    if j.get("_govt"):
+        fit = html_escape(j.get("_gov_fit", ""))
+        fit_cls = "govfit-good" if j.get("_gov_qualifies") else "govfit-no"
+        sg = j.get("_gov_grade", "")
+        sal = html_escape(j.get("_gov_monthly", ""))
+        line = f"SG {sg} &middot; {sal}" if sg else sal
+        entry_html += f'<div class="gov-note"><span class="badge govfit {fit_cls}">{fit}</span> {line}</div>'
+        if j.get("_gov_days_old") is not None:
+            if j.get("_gov_stale"):
+                entry_html += f'<div class="gov-stale">&#9888;&#65039; posted {j["_gov_days_old"]} days ago &mdash; the application window is likely closed; verify the deadline before applying.</div>'
+            else:
+                entry_html += f'<div class="gov-fresh">Posted {j["_gov_days_old"]} days ago &mdash; verify the deadline on the posting.</div>'
+        if j.get("_gov_verify_loc"):
+            entry_html += '<div class="gov-stale">&#128205; Duty station shown as Negros Oriental (provincial office is in Dumaguete) &mdash; confirm it is Dumaguete City.</div>'
     score = j.get("_score", 0)
     if score >= 10:
         match_class = "match-high"
@@ -3541,6 +3743,7 @@ def _render_row(j: dict, new_ids: set[str], section: str = "") -> str:
     pt_badge = ""
     if any(k in text_lower for k in PT_KEYWORDS):
         pt_badge = '<span class="badge pt">Part-time</span> '
+    gov_badge = '<span class="badge govbadge">&#127963;&#65039; Gov &middot; Dumaguete</span> ' if j.get("_govt") else ""
     entry_badge = '<span class="badge entrylvl">Entry-level</span> ' if j.get("_entry_signal") else ""
     benefits = j.get("_benefits") or []
     # John's priorities (generous leave + end-of-year shutdown) get a distinct gold badge; the rest stay blue.
@@ -3560,7 +3763,10 @@ def _render_row(j: dict, new_ids: set[str], section: str = "") -> str:
 
     pay = extract_pay(f"{j['title']} {j['description']}")
     salary = j.get("salary", "")
-    pay_display = pay or salary or ""
+    if j.get("_govt") and j.get("_gov_monthly"):
+        pay_display = j["_gov_monthly"]  # plantilla monthly salary
+    else:
+        pay_display = pay or salary or ""
     normalized = normalize_pay(pay_display)
     if pay_display and normalized and normalized != pay_display:
         pay_html = f'<span class="pay">{pay_display}</span><br><small class="pay-norm">{normalized}</small>'
@@ -3604,13 +3810,13 @@ def _render_row(j: dict, new_ids: set[str], section: str = "") -> str:
     src_attr = html_escape(j["source"])
     date_sort = int(j["date"].timestamp()) if j.get("date") else 0  # epoch so the Posted column sorts chronologically
     return f"""
-    <tr class="{' '.join(row_classes)}" data-id="{jid}" data-fit="{prob}" data-source="{src_attr}" data-section="{section}" data-search="{search_blob}" data-entry="{1 if j.get('_entry_signal') else 0}" data-benefits="{1 if benefits else 0}" data-flex="{1 if is_flex else 0}" data-rated="{1 if j.get('_employer_rating') else 0}" data-new="{1 if is_new else 0}" data-shutdown="{1 if j.get('_shutdown') else 0}" data-generousleave="{1 if j.get('_generous_leave') else 0}" data-leavedays="{j.get('_leave_days', 0)}" data-lanes="{(' '.join(t for t, on in (('us-tax', j.get('_us_tax')), ('aunz', j.get('_aunz')), ('legal', j.get('_legal'))) if on)) or ''}" data-type="{j.get('_jobtype', 'Other')}">
+    <tr class="{' '.join(row_classes)}" data-id="{jid}" data-fit="{prob}" data-source="{src_attr}" data-section="{section}" data-search="{search_blob}" data-entry="{1 if j.get('_entry_signal') else 0}" data-benefits="{1 if benefits else 0}" data-flex="{1 if is_flex else 0}" data-rated="{1 if j.get('_employer_rating') else 0}" data-new="{1 if is_new else 0}" data-shutdown="{1 if j.get('_shutdown') else 0}" data-generousleave="{1 if j.get('_generous_leave') else 0}" data-leavedays="{j.get('_leave_days', 0)}" data-govt="{1 if j.get('_govt') else 0}" data-lanes="{(' '.join(t for t, on in (('us-tax', j.get('_us_tax')), ('aunz', j.get('_aunz')), ('legal', j.get('_legal')), ('gov', j.get('_govt'))) if on)) or ''}" data-type="{j.get('_jobtype', 'Other')}">
         <td class="freshness" data-sort="{date_sort}">{freshness_label(j['date'])}</td>
         <td>
             <a href="{j['url']}" target="_blank" class="job-title">{j['title']}</a>
             {new_badge}
             <div class="company">{j['company']}</div>
-            <div style="margin-top:3px">{entry_badge}{leave_badge}{benefits_badge}{flex_badge}{pt_badge}</div>
+            <div style="margin-top:3px">{gov_badge}{entry_badge}{leave_badge}{benefits_badge}{flex_badge}{pt_badge}</div>
             {entry_html}
             <div class="desc">{desc_preview}</div>
             {tags_html}
@@ -3633,12 +3839,16 @@ def render_html(jobs: list[dict], new_ids: set[str], stats: dict) -> str:
     # Entry-level you have a chance at: any entry-level role in the user's wheelhouse, beyond the three lanes.
     def in_entry(j):
         return j.get("_entry_signal") and WHEELHOUSE.search(j["title"]) and not in_applylist(j) and not j.get("_high_pay")
-    apply_rows = [_render_row(j, new_ids, "apply-list") for j in jobs if in_applylist(j)]
-    entry_rows = [_render_row(j, new_ids, "entry-level") for j in jobs if in_entry(j)]
-    high_jobs = sorted((j for j in jobs if j.get("_high_pay") and not in_applylist(j)),
+    # Dumaguete government jobs get their own section and are kept out of the remote sections.
+    gov_jobs_list = [j for j in jobs if j.get("_govt")]
+    gov_rows = [_render_row(j, new_ids, "government") for j in gov_jobs_list]
+    nonmember = [j for j in jobs if not j.get("_govt")]
+    apply_rows = [_render_row(j, new_ids, "apply-list") for j in nonmember if in_applylist(j)]
+    entry_rows = [_render_row(j, new_ids, "entry-level") for j in nonmember if in_entry(j)]
+    high_jobs = sorted((j for j in nonmember if j.get("_high_pay") and not in_applylist(j)),
                        key=lambda j: j["_pay_usd"], reverse=True)
     high_rows = [_render_row(j, new_ids, "high-pay") for j in high_jobs]
-    rows = [_render_row(j, new_ids, "other") for j in jobs
+    rows = [_render_row(j, new_ids, "other") for j in nonmember
             if not in_entry(j) and not in_applylist(j) and not j.get("_high_pay")]
 
     source_summary = ", ".join(
@@ -3654,6 +3864,7 @@ def render_html(jobs: list[dict], new_ids: set[str], stats: dict) -> str:
   <select id="f-type" onchange="applyFilters()"><option value="">All job types</option></select>
   <select id="f-section" onchange="applyFilters()">
     <option value="">All sections</option>
+    <option value="government">Dumaguete gov</option>
     <option value="apply-list">Apply-list</option>
     <option value="entry-level">Entry-level</option>
     <option value="high-pay">High pay</option>
@@ -3678,6 +3889,7 @@ def render_html(jobs: list[dict], new_ids: set[str], stats: dict) -> str:
   <button type="button" class="chip" data-lane="us-tax" onclick="toggleLane(this)">US tax</button>
   <button type="button" class="chip" data-lane="aunz" onclick="toggleLane(this)">AU/NZ books</button>
   <button type="button" class="chip" data-lane="legal" onclick="toggleLane(this)">Legal</button>
+  <button type="button" class="chip" data-lane="gov" onclick="toggleLane(this)">&#127963;&#65039; Dumaguete gov</button>
 </div>
 <div class="hint">Tip: click a column header to sort. Quick filters stack with the search box &mdash; click a chip again to turn it off. Mark rows &#10003; applied or &#10005; hide &mdash; marks persist on this device.</div>"""
 
@@ -3924,6 +4136,14 @@ tr.flex-row td:first-child {{ padding-left: 10px; }}
 .badge.entrylvl {{ background: rgba(74,222,128,0.18); color: #86efac; }}
 .badge.benefits {{ background: rgba(96,165,250,0.18); color: #93c5fd; }}
 .badge.leave {{ background: rgba(251,191,36,0.20); color: #fcd34d; font-weight: 600; }}
+.badge.govbadge {{ background: rgba(167,139,250,0.20); color: #c4b5fd; font-weight: 600; }}
+.badge.govfit {{ font-weight: 600; }}
+.badge.govfit.govfit-good {{ background: rgba(74,222,128,0.18); color: #86efac; }}
+.badge.govfit.govfit-no {{ background: rgba(248,113,113,0.18); color: #fca5a5; }}
+.gov-note {{ margin-top: 4px; font-size: 0.8rem; color: var(--text-muted); }}
+.gov-stale {{ margin-top: 3px; font-size: 0.75rem; color: #fca5a5; }}
+.gov-fresh {{ margin-top: 3px; font-size: 0.75rem; color: var(--text-muted); }}
+.gov-table {{ border-left: 3px solid #a78bfa; }}
 .legal-tag {{ margin-top: 3px; }}
 .badge.legal-badge {{ font-size: 0.68rem; }}
 .badge.lf-good {{ background: rgba(96,165,250,0.18); color: #93c5fd; }}
@@ -3974,6 +4194,9 @@ th {{ user-select: none; }}
     <div class="stat-card"><div class="num">{stats['strong']}</div><div class="label">Strong match</div></div>
 </div>
 {controls_html}
+<h2 class="section-title">&#127963;&#65039; Dumaguete government jobs (legal &amp; CPA first) <span class="section-count">{len(gov_rows)}</span></h2>
+<div class="section-note">On-site Philippine government posts with a Dumaguete-City duty station (from the CSC mirror), your wheelhouse only &mdash; legal, accounting/audit, admin. Each shows the <strong>eligibility</strong> you'd need and whether you qualify. &#9888;&#65039; <strong>Government postings here are often weeks old and the application window (usually 10&ndash;15 days) may be closed &mdash; always verify the deadline on the posting.</strong> The live, complete source is the <a href="https://csc.gov.ph/career" target="_blank">CSC Job Portal</a>, which blocks this server; run the scraper on your Mac to include it.</div>
+{"<table class='gov-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(gov_rows) + "</tbody></table>" if gov_rows else '<div class="empty small">No Dumaguete government postings in the accessible mirror right now. A fresh legal or CPA vacancy will appear here automatically &mdash; or run on your Mac for the live CSC portal.</div>'}
 <h2 class="section-title">&#127919; Your apply-list: US tax + AU/NZ + legal (apply this week) <span class="section-count">{len(apply_rows)}</span></h2>
 <div class="section-note">Your target role types, surfaced together &mdash; <strong>US tax</strong> postings that don't require US experience you lack, <strong>AU/NZ Xero/bookkeeping</strong> (your fastest-hire fit), and <strong>legal support / paralegal</strong> roles (a law-student lane). Flexible/part-time surfaced higher. Apply within 1&ndash;2 days; match the CV to the role.</div>
 {"<table class='ustax-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(apply_rows) + "</tbody></table>" if apply_rows else '<div class="empty small">No US tax or AU/NZ roles cleared the filters today.</div>'}
@@ -4020,6 +4243,10 @@ def main():
     jobs = deduplicate(all_jobs)
     print(f"After dedup:  {len(jobs)}")
 
+    # Government (Dumaguete) jobs are on-site and bypass the remote-only gauntlet below.
+    gov_jobs = [j for j in jobs if j.get("_govt")]
+    jobs = [j for j in jobs if not j.get("_govt")]
+
     backfill_dates(jobs)
 
     jobs = filter_jobs(jobs)
@@ -4029,6 +4256,17 @@ def main():
     jobs = mark_entry_level(jobs)
     jobs = exclude_country_experience_required(jobs)
     jobs = exclude_blocked_hours(jobs)
+
+    # merge the government lane back in (already Dumaguete-filtered; skips the remote checks)
+    for g in gov_jobs:
+        if g.get("date") and g["date"].tzinfo is None:
+            g["date"] = g["date"].replace(tzinfo=timezone.utc)
+        g["_score"] = relevance_score(g["title"], g["description"], g.get("location", ""))
+        g["_prob"] = acceptance_probability(g["title"], g["description"], g.get("location", ""), g.get("tags"))
+        g.setdefault("_full_text", g.get("description", ""))
+    jobs = jobs + gov_jobs
+    print(f"Government (Dumaguete) jobs: {len(gov_jobs)}")
+
     mark_us_tax(jobs)
     mark_aunz(jobs)
     mark_legal(jobs)
