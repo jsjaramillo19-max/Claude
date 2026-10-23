@@ -3390,8 +3390,11 @@ GOV_EXCLUDE_PROF = re.compile(
     r"engineer|architect|nurse|physician|\bdoctor\b|cartograph|science research|agrarian|technologist|"
     r"veterinar|forester|chemist|geolog|teacher|professor|dentist|pharmacist|agricultur|statistician|"
     r"econom|information (systems|technology)|computer|programmer|\bit\b|nutrition|midwife|social worker", re.I)
-GOV_MAX_AGE_DAYS = 150   # show the latest handful (gov vacancies are rare) ...
-GOV_STALE_DAYS = 25      # ... but flag anything past a typical CSC application window as likely closed
+# govjobs.ph carries no closing date (only the CSC portal does), so we approximate the open window
+# from the posting date: CSC vacancies are usually open ~10-15 days. Hide anything past 21 days as
+# almost certainly closed, and tag the rest "verify the closing date on CSC".
+GOV_MAX_AGE_DAYS = 21
+GOV_STALE_DAYS = 12
 
 
 def _gov_wheelhouse_ok(title: str) -> bool:
@@ -3720,9 +3723,9 @@ def _render_row(j: dict, new_ids: set[str], section: str = "") -> str:
         entry_html += f'<div class="gov-note"><span class="badge govfit {fit_cls}">{fit}</span> {line}</div>'
         if j.get("_gov_days_old") is not None:
             if j.get("_gov_stale"):
-                entry_html += f'<div class="gov-stale">&#9888;&#65039; posted {j["_gov_days_old"]} days ago &mdash; the application window is likely closed; verify the deadline before applying.</div>'
+                entry_html += f'<div class="gov-stale">&#9888;&#65039; posted {j["_gov_days_old"]} days ago &mdash; a CSC window is usually 10&ndash;15 days, so this may already be closed. Check the closing date on the <a href="https://csc.gov.ph/career" target="_blank">CSC portal</a> before applying.</div>'
             else:
-                entry_html += f'<div class="gov-fresh">Posted {j["_gov_days_old"]} days ago &mdash; verify the deadline on the posting.</div>'
+                entry_html += f'<div class="gov-fresh">Posted {j["_gov_days_old"]} days ago &mdash; the mirror has no closing date; confirm it on the <a href="https://csc.gov.ph/career" target="_blank">CSC portal</a>.</div>'
         if j.get("_gov_verify_loc"):
             entry_html += '<div class="gov-stale">&#128205; Duty station shown as Negros Oriental (provincial office is in Dumaguete) &mdash; confirm it is Dumaguete City.</div>'
     score = j.get("_score", 0)
@@ -4195,8 +4198,8 @@ th {{ user-select: none; }}
 </div>
 {controls_html}
 <h2 class="section-title">&#127963;&#65039; Dumaguete government jobs (legal &amp; CPA first) <span class="section-count">{len(gov_rows)}</span></h2>
-<div class="section-note">On-site Philippine government posts with a Dumaguete-City duty station (from the CSC mirror), your wheelhouse only &mdash; legal, accounting/audit, admin. Each shows the <strong>eligibility</strong> you'd need and whether you qualify. &#9888;&#65039; <strong>Government postings here are often weeks old and the application window (usually 10&ndash;15 days) may be closed &mdash; always verify the deadline on the posting.</strong> The live, complete source is the <a href="https://csc.gov.ph/career" target="_blank">CSC Job Portal</a>, which blocks this server; run the scraper on your Mac to include it.</div>
-{"<table class='gov-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(gov_rows) + "</tbody></table>" if gov_rows else '<div class="empty small">No Dumaguete government postings in the accessible mirror right now. A fresh legal or CPA vacancy will appear here automatically &mdash; or run on your Mac for the live CSC portal.</div>'}
+<div class="section-note">On-site Philippine government posts with a Dumaguete-City duty station, your wheelhouse only &mdash; legal, accounting/audit, admin &mdash; each showing the <strong>eligibility</strong> you'd need and whether you qualify. The mirror (govjobs.ph) <strong>does not carry the closing date</strong> &mdash; only the <a href="https://csc.gov.ph/career" target="_blank">CSC Job Portal</a> does &mdash; so I only show postings from the <strong>last 3 weeks</strong> (a typical CSC window) and you should still confirm the deadline on CSC. The live CSC portal blocks this server; run the scraper on your Mac to read real closing dates.</div>
+{"<table class='gov-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(gov_rows) + "</tbody></table>" if gov_rows else '<div class="empty small">No open Dumaguete government postings in the mirror right now (closed ones are hidden). A fresh legal or CPA vacancy will appear here automatically &mdash; or run on your Mac to read the live CSC portal with real closing dates.</div>'}
 <h2 class="section-title">&#127919; Your apply-list: US tax + AU/NZ + legal (apply this week) <span class="section-count">{len(apply_rows)}</span></h2>
 <div class="section-note">Your target role types, surfaced together &mdash; <strong>US tax</strong> postings that don't require US experience you lack, <strong>AU/NZ Xero/bookkeeping</strong> (your fastest-hire fit), and <strong>legal support / paralegal</strong> roles (a law-student lane). Flexible/part-time surfaced higher. Apply within 1&ndash;2 days; match the CV to the role.</div>
 {"<table class='ustax-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(apply_rows) + "</tbody></table>" if apply_rows else '<div class="empty small">No US tax or AU/NZ roles cleared the filters today.</div>'}
