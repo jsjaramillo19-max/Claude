@@ -3177,6 +3177,39 @@ def detect_benefits(title: str, text: str) -> list[str]:
     return [label for label, pat in BENEFIT_PATTERNS if re.search(pat, blob)]
 
 
+# John's top benefit priorities: lots of annual leave, and an AU/NZ-style paid
+# end-of-year shutdown (the whole office closes, usually over Christmas-New Year).
+GENEROUS_LEAVE_MIN = 15  # days — roughly 3+ weeks; AU/NZ standard is 20 (4 weeks)
+
+# "25 days annual leave", "20 days of paid leave", "4 weeks annual leave"
+_LEAVE_A = re.compile(r"(\d{1,3})\s*\+?\s*(days?|weeks?)\s*(?:of\s+)?(?:paid\s+)?(?:annual\s+|vacation\s+|holiday\s+)?(?:leave|pto|vacation|holiday|time[- ]?off)", re.I)
+# "annual leave: 25 days", "leave entitlement of 4 weeks"
+_LEAVE_B = re.compile(r"(?:annual leave|vacation|\bpto\b|holiday entitlement|leave entitlement|paid leave|time[- ]?off)[^.\n]{0,25}?(\d{1,3})\s*\+?\s*(days?|weeks?)", re.I)
+_SHUTDOWN = re.compile(
+    r"(?:christmas|xmas|office|holiday|festive|year[- ]end|end[- ]of[- ]year|annual|company)\s*"
+    r"(?:shut\s?down|close\s?down|closure|close)"
+    r"|(?:shut\s?down|close\s?down|closure)\s*period"
+    r"|paid shut\s?down|office closed over",
+    re.I,
+)
+
+
+def detect_leave(title: str, text: str) -> tuple[int, bool]:
+    """Best-guess max annual-leave days stated, and whether a paid end-of-year shutdown is mentioned."""
+    blob = f"{title} {text}"
+    best = 0
+    for rx in (_LEAVE_A, _LEAVE_B):
+        for m in rx.finditer(blob):
+            n = int(m.group(1))
+            unit = m.group(2).lower()
+            days = n * 5 if unit.startswith("week") else n
+            # sanity: ignore absurd matches (e.g. "365 days") and obvious non-leave numbers
+            if 1 <= days <= 60:
+                best = max(best, days)
+    shutdown = bool(_SHUTDOWN.search(blob))
+    return best, shutdown
+
+
 # Job type, matched title-first then falling back to the body. Order is priority:
 # the first pattern that hits the title wins, so "Senior Tax Accountant" lands in Tax, not Accounting.
 JOBTYPE_PATTERNS = [
@@ -3213,10 +3246,27 @@ def enrich_entry_and_busyness(jobs: list[dict]) -> None:
         full = get_full_text(j) or j.get("description", "")
         j["_busy"], j["_busy_label"] = busyness_rating(j["title"], full)
         j["_entry_signal"] = bool(j.get("_entry")) or entry_signal(j["title"], full)
-        j["_benefits"] = detect_benefits(j["title"], full)
         j["_jobtype"] = categorize_job(j["title"], full)
+        benefits = detect_benefits(j["title"], full)
+        leave_days, shutdown = detect_leave(j["title"], full)
+        j["_leave_days"] = leave_days
+        j["_shutdown"] = shutdown
+        # John prioritises generous leave + an AU/NZ-style shutdown, so surface those first in the badge.
+        priority = []
+        if shutdown:
+            priority.append("\N{CHRISTMAS TREE} shutdown period")
+        if leave_days >= GENEROUS_LEAVE_MIN:
+            priority.append(f"{leave_days} days leave")
+        elif leave_days:
+            # keep a generic "PTO/leave" tag but note the (smaller) day count
+            benefits = [b for b in benefits if b != "PTO/leave"]
+            priority.append(f"{leave_days} days leave")
+        j["_benefits"] = priority + [b for b in benefits if b not in priority]
+        j["_generous_leave"] = leave_days >= GENEROUS_LEAVE_MIN
     print(f"Entry-level (any lane): {sum(1 for j in jobs if j.get('_entry_signal'))} jobs")
     print(f"Roles mentioning benefits: {sum(1 for j in jobs if j.get('_benefits'))} jobs")
+    print(f"  of which: {sum(1 for j in jobs if j.get('_shutdown'))} name an end-of-year shutdown, "
+          f"{sum(1 for j in jobs if j.get('_generous_leave'))} offer {GENEROUS_LEAVE_MIN}+ days leave")
 
 
 def mark_high_pay(jobs: list[dict]) -> None:
@@ -3432,10 +3482,12 @@ def sort_jobs(jobs: list[dict]) -> list[dict]:
     def sort_key(j):
         prob = j.get("_prob", 40)
         flex_bonus = 12 if _is_flex_or_pt(j) else 0  # surface flexible/part-time well up the list
+        # John prioritises generous leave + an AU/NZ-style shutdown: nudge those up among similar roles.
+        leave_bonus = (6 if j.get("_shutdown") else 0) + (4 if j.get("_generous_leave") else 0)
         dt = j.get("date")
         has_date = 0 if dt is None else 1
         dt = dt or datetime.min.replace(tzinfo=timezone.utc)
-        return (prob + flex_bonus, has_date, dt, j.get("_score", 0))
+        return (prob + flex_bonus + leave_bonus, has_date, dt, j.get("_score", 0))
     return sorted(jobs, key=sort_key, reverse=True)
 
 
@@ -3481,7 +3533,11 @@ def _render_row(j: dict, new_ids: set[str], section: str = "") -> str:
         pt_badge = '<span class="badge pt">Part-time</span> '
     entry_badge = '<span class="badge entrylvl">Entry-level</span> ' if j.get("_entry_signal") else ""
     benefits = j.get("_benefits") or []
-    benefits_badge = f'<span class="badge benefits" title="Benefits mentioned in the posting">&#128153; {" &middot; ".join(benefits)}</span> ' if benefits else ""
+    # John's priorities (generous leave + end-of-year shutdown) get a distinct gold badge; the rest stay blue.
+    leave_bits = [b for b in benefits if "shutdown period" in b or "days leave" in b]
+    other_bits = [b for b in benefits if b not in leave_bits]
+    leave_badge = f'<span class="badge leave" title="Leave &amp; shutdown — your priority">{" &middot; ".join(leave_bits)}</span> ' if leave_bits else ""
+    benefits_badge = f'<span class="badge benefits" title="Benefits mentioned in the posting">&#128153; {" &middot; ".join(other_bits)}</span> ' if other_bits else ""
 
     tags_html = ""
     if j.get("tags"):
@@ -3538,13 +3594,13 @@ def _render_row(j: dict, new_ids: set[str], section: str = "") -> str:
     src_attr = html_escape(j["source"])
     date_sort = int(j["date"].timestamp()) if j.get("date") else 0  # epoch so the Posted column sorts chronologically
     return f"""
-    <tr class="{' '.join(row_classes)}" data-id="{jid}" data-fit="{prob}" data-source="{src_attr}" data-section="{section}" data-search="{search_blob}" data-entry="{1 if j.get('_entry_signal') else 0}" data-benefits="{1 if benefits else 0}" data-flex="{1 if is_flex else 0}" data-rated="{1 if j.get('_employer_rating') else 0}" data-new="{1 if is_new else 0}" data-lanes="{(' '.join(t for t, on in (('us-tax', j.get('_us_tax')), ('aunz', j.get('_aunz')), ('legal', j.get('_legal'))) if on)) or ''}" data-type="{j.get('_jobtype', 'Other')}">
+    <tr class="{' '.join(row_classes)}" data-id="{jid}" data-fit="{prob}" data-source="{src_attr}" data-section="{section}" data-search="{search_blob}" data-entry="{1 if j.get('_entry_signal') else 0}" data-benefits="{1 if benefits else 0}" data-flex="{1 if is_flex else 0}" data-rated="{1 if j.get('_employer_rating') else 0}" data-new="{1 if is_new else 0}" data-shutdown="{1 if j.get('_shutdown') else 0}" data-generousleave="{1 if j.get('_generous_leave') else 0}" data-leavedays="{j.get('_leave_days', 0)}" data-lanes="{(' '.join(t for t, on in (('us-tax', j.get('_us_tax')), ('aunz', j.get('_aunz')), ('legal', j.get('_legal'))) if on)) or ''}" data-type="{j.get('_jobtype', 'Other')}">
         <td class="freshness" data-sort="{date_sort}">{freshness_label(j['date'])}</td>
         <td>
             <a href="{j['url']}" target="_blank" class="job-title">{j['title']}</a>
             {new_badge}
             <div class="company">{j['company']}</div>
-            <div style="margin-top:3px">{entry_badge}{benefits_badge}{flex_badge}{pt_badge}</div>
+            <div style="margin-top:3px">{entry_badge}{leave_badge}{benefits_badge}{flex_badge}{pt_badge}</div>
             {entry_html}
             <div class="desc">{desc_preview}</div>
             {tags_html}
@@ -3602,6 +3658,8 @@ def render_html(jobs: list[dict], new_ids: set[str], stats: dict) -> str:
   <span class="chip-label">Quick filters:</span>
   <button type="button" class="chip" data-flag="entry" onclick="toggleChip(this)">&#11088; Entry-level</button>
   <button type="button" class="chip" data-flag="benefits" onclick="toggleChip(this)">&#128153; Has benefits</button>
+  <button type="button" class="chip chip-gold" data-flag="generousleave" onclick="toggleChip(this)">&#127796; 15+ days leave</button>
+  <button type="button" class="chip chip-gold" data-flag="shutdown" onclick="toggleChip(this)">&#127876; Shutdown period</button>
   <button type="button" class="chip" data-flag="flex" onclick="toggleChip(this)">&#9201; Flexible / part-time</button>
   <button type="button" class="chip" data-flag="rated" onclick="toggleChip(this)">&#9733; Rated employer</button>
   <button type="button" class="chip" data-flag="new" onclick="toggleChip(this)">&#128293; New today</button>
@@ -3855,6 +3913,7 @@ tr.flex-row td:first-child {{ padding-left: 10px; }}
 .emp-rating {{ color: #fbbf24; font-size: 0.72rem; white-space: nowrap; }}
 .badge.entrylvl {{ background: rgba(74,222,128,0.18); color: #86efac; }}
 .badge.benefits {{ background: rgba(96,165,250,0.18); color: #93c5fd; }}
+.badge.leave {{ background: rgba(251,191,36,0.20); color: #fcd34d; font-weight: 600; }}
 .legal-tag {{ margin-top: 3px; }}
 .badge.legal-badge {{ font-size: 0.68rem; }}
 .badge.lf-good {{ background: rgba(96,165,250,0.18); color: #93c5fd; }}
@@ -3877,6 +3936,8 @@ tr.flex-row td:first-child {{ padding-left: 10px; }}
 .chip {{ background: var(--bg); color: var(--text-muted); border: 1px solid var(--border); border-radius: 999px; padding: 5px 11px; font-size: 0.78rem; cursor: pointer; transition: all .12s; }}
 .chip:hover {{ color: var(--text); border-color: var(--accent); }}
 .chip.active {{ background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }}
+.chip-gold {{ border-color: rgba(251,191,36,0.5); color: #fcd34d; }}
+.chip-gold.active {{ background: #d97706; color: #fff; border-color: #d97706; }}
 tr.row-applied {{ opacity: 0.55; }}
 tr.row-applied .job-title::after {{ content: " \\2713"; color: var(--green); }}
 tr.row-hidden {{ opacity: 0.4; }}
