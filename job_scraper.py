@@ -3367,6 +3367,32 @@ tr.flex-row td:first-child {{ padding-left: 10px; }}
     color: var(--text-muted);
     text-align: center;
 }}
+.searchbar {{
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--bg);
+    padding: 10px 0 14px;
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+}}
+.searchbar input {{
+    flex: 1 1 320px;
+    max-width: 520px;
+    padding: 10px 14px;
+    font-size: 0.95rem;
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    outline: none;
+}}
+.searchbar input:focus {{ border-color: var(--accent); }}
+.searchbar .count {{ font-size: 0.8rem; color: var(--text-muted); white-space: nowrap; }}
+tr.hidden-row, .sec-hidden {{ display: none; }}
 </style>
 </head>
 <body>
@@ -3379,6 +3405,10 @@ tr.flex-row td:first-child {{ padding-left: 10px; }}
     <div class="stat-card"><div class="num">{stats['new']}</div><div class="label">New today</div></div>
     <div class="stat-card"><div class="num">{stats['strong']}</div><div class="label">Strong match</div></div>
 </div>
+<div class="searchbar">
+    <input id="jobSearch" type="search" placeholder="Search jobs — title, company, location, source, description…" autocomplete="off" autofocus>
+    <span class="count" id="searchCount"></span>
+</div>
 <h2 class="section-title">True entry-level: tax, legal &amp; analyst <span class="section-count">{len(entry_rows)}</span></h2>
 <div class="section-note">Remote roles whose full posting asks for no prior experience. Each row says why it qualified.</div>
 {"<table class='entry-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(entry_rows) + "</tbody></table>" if entry_rows else '<div class="empty small">No genuine entry-level tax, legal or analyst jobs today.</div>'}
@@ -3388,6 +3418,49 @@ tr.flex-row td:first-child {{ padding-left: 10px; }}
 <h2 class="section-title">All other jobs <span class="section-count">{len(rows)}</span></h2>
 {"<table><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>" if rows else '<div class="empty">No matching jobs found today. The scraper will check again tomorrow.</div>'}
 <div class="footer">Part-time &amp; flexible-hours jobs shown first, then by posting date (newest first). Score based on Xero, NZ/AU, part-time, bookkeeping keywords.</div>
+<script>
+(function () {{
+    var input = document.getElementById('jobSearch');
+    var countEl = document.getElementById('searchCount');
+    if (!input) return;
+    var tables = Array.prototype.slice.call(document.querySelectorAll('table'));
+    var rows = [];
+    tables.forEach(function (t) {{
+        Array.prototype.slice.call(t.querySelectorAll('tbody tr')).forEach(function (tr) {{
+            rows.push({{ tr: tr, text: tr.textContent.toLowerCase() }});
+        }});
+    }});
+    var total = rows.length;
+    function sectionEls(table) {{
+        var els = [table];
+        var el = table.previousElementSibling;
+        while (el) {{
+            els.push(el);
+            if (el.classList && el.classList.contains('section-title')) break;
+            el = el.previousElementSibling;
+        }}
+        return els;
+    }}
+    var sections = tables.map(function (t) {{ return {{ table: t, els: sectionEls(t) }}; }});
+    function apply() {{
+        var q = input.value.trim().toLowerCase();
+        var terms = q.split(/\\s+/).filter(Boolean);
+        var shown = 0;
+        rows.forEach(function (r) {{
+            var match = terms.every(function (t) {{ return r.text.indexOf(t) !== -1; }});
+            r.tr.classList.toggle('hidden-row', !match);
+            if (match) shown++;
+        }});
+        sections.forEach(function (s) {{
+            var vis = s.table.querySelectorAll('tbody tr:not(.hidden-row)').length;
+            s.els.forEach(function (el) {{ el.classList.toggle('sec-hidden', vis === 0); }});
+        }});
+        countEl.textContent = q ? (shown + ' of ' + total + ' shown') : (total + ' jobs');
+    }}
+    input.addEventListener('input', apply);
+    apply();
+}})();
+</script>
 </body>
 </html>"""
 
