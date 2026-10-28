@@ -2619,7 +2619,20 @@ def _onlinejobs_full_text(url: str) -> str:
     return text[start if start >= 0 else 0:][:10000]
 
 
+def _generic_ats_full_text(url: str) -> str:
+    """Visible text of an applicant-tracking-system posting page (breezy, greenhouse, lever, jobvite, ...)."""
+    resp = requests.get(url, headers=_headers(), timeout=REQUEST_TIMEOUT)
+    if resp.status_code != 200:
+        return ""
+    soup = BeautifulSoup(resp.content, "html.parser")
+    for tag in soup(["script", "style", "nav", "header", "footer"]):
+        tag.decompose()
+    text = soup.get_text("\n", strip=True)
+    return re.sub(r"\n{2,}", "\n", text)[:10000]
+
+
 def fetch_full_description(j: dict) -> str:
+    existing = j.get("full_description") or j.get("description") or ""
     try:
         source = j.get("source", "")
         if source == "Jobstreet PH":
@@ -2630,9 +2643,13 @@ def fetch_full_description(j: dict) -> str:
             return _onlinejobs_full_text(j["url"])
         elif source == "LinkedIn":
             return _linkedin_fetch_description(j["url"], max_chars=None)
+        elif source == "RemoteRocketship" and j.get("url"):
+            # RemoteRocketship only exposes a two-line summary; the requirements live on the linked ATS page.
+            fetched = _generic_ats_full_text(j["url"])
+            return fetched if len(fetched) > len(existing) else existing
     except Exception as e:
         print(f"  [full text/{j.get('source')}] error: {e}")
-    return j.get("full_description") or j.get("description") or ""
+    return existing
 
 
 def _posting_lines(title: str, full_text: str):
@@ -2929,7 +2946,7 @@ def prefetch_full_texts(jobs: list[dict]) -> None:
 
     by_source = {}
     for j in jobs:
-        if j.get("source") in ("Jobstreet PH", "OnlineJobs.ph", "LinkedIn") and not will_be_dropped(j):
+        if j.get("source") in ("Jobstreet PH", "OnlineJobs.ph", "LinkedIn", "RemoteRocketship") and not will_be_dropped(j):
             by_source.setdefault(j["source"], []).append(j)
     lanes = [group[i::2] for group in by_source.values() for i in range(2)]
     with ThreadPoolExecutor(max_workers=max(1, len(lanes))) as pool:
@@ -2940,7 +2957,7 @@ def get_full_text(j: dict) -> str:
     """Full posting text, fetched once per job and cached on the dict."""
     if "_full_text" not in j:
         j["_full_text"] = fetch_full_description(j)
-        if j.get("source") in ("Jobstreet PH", "OnlineJobs.ph", "LinkedIn"):
+        if j.get("source") in ("Jobstreet PH", "OnlineJobs.ph", "LinkedIn", "RemoteRocketship"):
             time.sleep(random.uniform(0.4, 0.9))
     return j["_full_text"]
 
