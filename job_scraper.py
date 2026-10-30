@@ -352,7 +352,8 @@ def busyness_rating(title: str, description: str) -> tuple[int, str]:
         score += 0.5
     if any(k in text for k in ["own pace", "at your own pace", "no rush", "relaxed", "low volume"]):
         score -= 1.0
-    if any(k in text for k in ["flexible", "flex schedule", "own hours", "set your own hours", "anytime"]):
+    # only a flexible *schedule* signals lighter load; "flexible work arrangements" is a work-life-balance perk, not hours
+    if any(k in text for k in ["flexible hours", "flexible schedule", "flexible time", "flex schedule", "own hours", "set your own hours", "work anytime"]):
         score -= 0.5
     if any(k in text for k in ["one-time", "one time", "single project", "small project", "quick project", "simple task"]):
         score -= 1.0
@@ -360,6 +361,9 @@ def busyness_rating(title: str, description: str) -> tuple[int, str]:
         score += 0.3
     if any(k in text for k in ["manager", "lead", "supervisor", "team lead", "oversee"]):
         score += 0.5
+    # senior/principal roles carry heavier, more autonomous workloads than the "Moderate" baseline
+    if re.search(r"\b(senior|sr\.?|principal|lead|head|director)\b", title_lower):
+        score += 0.75
     if any(k in text for k in ["data entry", "simple bookkeeping", "basic bookkeeping", "basic accounting"]):
         score -= 0.5
     s = max(1, min(5, round(score)))
@@ -3515,6 +3519,10 @@ def main():
     print(f"After filter: {len(jobs)}")
 
     prefetch_full_texts(jobs)
+    # re-rate workload on the full posting: the preview is often just recruiting boilerplate,
+    # so the real responsibilities (and the hours/seniority signals) are only visible now
+    for j in jobs:
+        j["_busy"], j["_busy_label"] = busyness_rating(j["title"], get_full_text(j) or j.get("description", ""))
     jobs = mark_entry_level(jobs)
     jobs = exclude_country_experience_required(jobs)
     jobs = exclude_blocked_hours(jobs)
