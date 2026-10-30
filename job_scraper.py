@@ -3208,9 +3208,16 @@ def _render_row(j: dict, new_ids: set[str]) -> str:
         row_classes.append("new-row")
     if is_flex:
         row_classes.append("flex-row")
+    data_match = {"match-high": "strong", "match-med": "good", "match-low": "look"}[match_class]
+    data_attrs = (
+        f'data-source="{html_escape(j["source"])}" data-match="{data_match}" '
+        f'data-workload="{busy_label.lower()}" data-new="{"1" if is_new else "0"}" '
+        f'data-flex="{"1" if flex_badge else "0"}" data-pt="{"1" if pt_badge else "0"}" '
+        f'data-pay="{"1" if pay_display else "0"}"'
+    )
 
     return f"""
-    <tr class="{' '.join(row_classes)}">
+    <tr class="{' '.join(row_classes)}" {data_attrs}>
         <td class="freshness">{freshness_label(j['date'])}</td>
         <td>
             <a href="{j['url']}" target="_blank" class="job-title">{j['title']}</a>
@@ -3414,6 +3421,43 @@ tr.flex-row td:first-child {{ padding-left: 10px; }}
 .searchbar input:focus {{ border-color: var(--accent); }}
 .searchbar .count {{ font-size: 0.8rem; color: var(--text-muted); white-space: nowrap; }}
 tr.hidden-row, .sec-hidden {{ display: none; }}
+.filters {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 18px;
+    align-items: center;
+    margin-bottom: 16px;
+    padding: 12px 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}}
+.filter-group {{ display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }}
+.filter-label {{ font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-right: 2px; }}
+.chip {{
+    cursor: pointer;
+    background: #0f172a;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 4px 11px;
+    font-size: 0.78rem;
+    font-family: inherit;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+}}
+.chip:hover {{ border-color: var(--accent); color: var(--text); }}
+.chip.active {{ background: var(--accent); color: #04243a; border-color: var(--accent); font-weight: 600; }}
+.chip.clear {{ margin-left: auto; border-style: dashed; }}
+#sourceFilter {{
+    background: #0f172a;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 5px 8px;
+    font-size: 0.78rem;
+    font-family: inherit;
+    max-width: 220px;
+}}
 </style>
 </head>
 <body>
@@ -3430,6 +3474,34 @@ tr.hidden-row, .sec-hidden {{ display: none; }}
     <input id="jobSearch" type="search" placeholder="Search jobs — title, company, location, source, description…" autocomplete="off" autofocus>
     <span class="count" id="searchCount"></span>
 </div>
+<div class="filters">
+    <div class="filter-group">
+        <span class="filter-label">Match</span>
+        <button class="chip" data-filter="match" data-value="strong">Strong</button>
+        <button class="chip" data-filter="match" data-value="good">Good</button>
+        <button class="chip" data-filter="match" data-value="look">Worth a look</button>
+    </div>
+    <div class="filter-group">
+        <span class="filter-label">Workload</span>
+        <button class="chip" data-filter="workload" data-value="light">Light</button>
+        <button class="chip" data-filter="workload" data-value="easy">Easy</button>
+        <button class="chip" data-filter="workload" data-value="moderate">Moderate</button>
+        <button class="chip" data-filter="workload" data-value="busy">Busy</button>
+        <button class="chip" data-filter="workload" data-value="heavy">Heavy</button>
+    </div>
+    <div class="filter-group">
+        <span class="filter-label">Show only</span>
+        <button class="chip" data-filter="new" data-value="1">New today</button>
+        <button class="chip" data-filter="pt" data-value="1">Part-time</button>
+        <button class="chip" data-filter="flex" data-value="1">Flexible hours</button>
+        <button class="chip" data-filter="pay" data-value="1">Has pay</button>
+    </div>
+    <div class="filter-group">
+        <span class="filter-label">Source</span>
+        <select id="sourceFilter"><option value="">All sources</option></select>
+    </div>
+    <button id="clearFilters" class="chip clear">Clear all</button>
+</div>
 <h2 class="section-title">True entry-level: tax, legal &amp; analyst <span class="section-count">{len(entry_rows)}</span></h2>
 <div class="section-note">Remote roles whose full posting asks for no prior experience. Each row says why it qualified.</div>
 {"<table class='entry-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(entry_rows) + "</tbody></table>" if entry_rows else '<div class="empty small">No genuine entry-level tax, legal or analyst jobs today.</div>'}
@@ -3443,15 +3515,29 @@ tr.hidden-row, .sec-hidden {{ display: none; }}
 (function () {{
     var input = document.getElementById('jobSearch');
     var countEl = document.getElementById('searchCount');
+    var sourceSel = document.getElementById('sourceFilter');
+    var clearBtn = document.getElementById('clearFilters');
     if (!input) return;
+    var chips = Array.prototype.slice.call(document.querySelectorAll('.chip[data-filter]'));
     var tables = Array.prototype.slice.call(document.querySelectorAll('table'));
     var rows = [];
     tables.forEach(function (t) {{
         Array.prototype.slice.call(t.querySelectorAll('tbody tr')).forEach(function (tr) {{
-            rows.push({{ tr: tr, text: tr.textContent.toLowerCase() }});
+            rows.push({{ tr: tr, text: tr.textContent.toLowerCase(), d: tr.dataset }});
         }});
     }});
     var total = rows.length;
+
+    // fill the source dropdown from the rows actually present, with per-source counts
+    var counts = {{}};
+    rows.forEach(function (r) {{ if (r.d.source) counts[r.d.source] = (counts[r.d.source] || 0) + 1; }});
+    Object.keys(counts).sort().forEach(function (s) {{
+        var o = document.createElement('option');
+        o.value = s;
+        o.textContent = s + ' (' + counts[s] + ')';
+        sourceSel.appendChild(o);
+    }});
+
     function sectionEls(table) {{
         var els = [table];
         var el = table.previousElementSibling;
@@ -3463,22 +3549,56 @@ tr.hidden-row, .sec-hidden {{ display: none; }}
         return els;
     }}
     var sections = tables.map(function (t) {{ return {{ table: t, els: sectionEls(t) }}; }});
+
+    function activeGroups() {{
+        // {{ filterName: Set(values) }}; within a group a row matches ANY selected value, groups are AND-ed
+        var g = {{}};
+        chips.forEach(function (c) {{
+            if (c.classList.contains('active')) {{
+                var k = c.dataset.filter;
+                (g[k] = g[k] || {{}})[c.dataset.value] = true;
+            }}
+        }});
+        return g;
+    }}
+
     function apply() {{
         var q = input.value.trim().toLowerCase();
         var terms = q.split(/\\s+/).filter(Boolean);
+        var groups = activeGroups();
+        var src = sourceSel.value;
+        var anyChip = false;
+        chips.forEach(function (c) {{ if (c.classList.contains('active')) anyChip = true; }});
         var shown = 0;
         rows.forEach(function (r) {{
-            var match = terms.every(function (t) {{ return r.text.indexOf(t) !== -1; }});
-            r.tr.classList.toggle('hidden-row', !match);
-            if (match) shown++;
+            var ok = terms.every(function (t) {{ return r.text.indexOf(t) !== -1; }});
+            if (ok && src) ok = r.d.source === src;
+            if (ok) {{
+                for (var key in groups) {{
+                    if (!groups[key][r.d[key]]) {{ ok = false; break; }}
+                }}
+            }}
+            r.tr.classList.toggle('hidden-row', !ok);
+            if (ok) shown++;
         }});
         sections.forEach(function (s) {{
             var vis = s.table.querySelectorAll('tbody tr:not(.hidden-row)').length;
             s.els.forEach(function (el) {{ el.classList.toggle('sec-hidden', vis === 0); }});
         }});
-        countEl.textContent = q ? (shown + ' of ' + total + ' shown') : (total + ' jobs');
+        countEl.textContent = (q || src || anyChip) ? (shown + ' of ' + total + ' shown') : (total + ' jobs');
     }}
+
+    chips.forEach(function (c) {{
+        c.addEventListener('click', function () {{ c.classList.toggle('active'); apply(); }});
+    }});
+    sourceSel.addEventListener('change', apply);
     input.addEventListener('input', apply);
+    clearBtn.addEventListener('click', function () {{
+        chips.forEach(function (c) {{ c.classList.remove('active'); }});
+        sourceSel.value = '';
+        input.value = '';
+        apply();
+    }});
     apply();
 }})();
 </script>
