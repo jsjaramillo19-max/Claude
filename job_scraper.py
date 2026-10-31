@@ -714,6 +714,9 @@ def freshness_label(dt: datetime | None) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     delta = now - dt
+    if delta.total_seconds() < 0:
+        # some sources post dates slightly in the future (timezone skew); treat as just-posted
+        return "Just now"
     if delta.days == 0:
         hours = delta.seconds // 3600
         if hours == 0:
@@ -3113,11 +3116,15 @@ PT_KEYWORDS = [
 
 def sort_jobs(jobs: list[dict]) -> list[dict]:
     # default sort: freshness of the posting (newest first); undated postings sort last
+    now = datetime.now(timezone.utc)
     def sort_key(j):
         dt = j.get("date")
         if dt is None:
             return (0, datetime.min.replace(tzinfo=timezone.utc), j.get("_score", 0))
-        return (1, dt, j.get("_score", 0))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        # clamp future dates so timezone-skewed postings don't outrank genuinely fresh ones
+        return (1, min(dt, now), j.get("_score", 0))
     return sorted(jobs, key=sort_key, reverse=True)
 
 
