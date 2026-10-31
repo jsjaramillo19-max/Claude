@@ -293,10 +293,7 @@ HEADERS = _headers()
 REQUEST_TIMEOUT = 30
 
 
-MAX_AGE_DAYS = 7
-# NZ/AU offshore roles (rare, closest to the user's experience) and company careers pages get a longer window
-NICHE_MAX_AGE_DAYS = 30
-NICHE_PATTERN = re.compile(r"new zealand|\bnz\b|australia|\bau/nz\b|\bnz/au\b")
+MAX_AGE_DAYS = 7  # hard cap: postings older than this are dropped, every source alike
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────
@@ -1787,11 +1784,10 @@ def _anywhere_but_us_domestic(countries: list[str], text: str) -> bool:
 
 
 def _too_old_to_fetch(title: str, listed: datetime | None) -> bool:
-    """Skip opening job pages that filter_jobs would discard anyway (NZ/AU titles get the longer window)."""
+    """Skip opening job pages that filter_jobs would discard anyway (hard cap at MAX_AGE_DAYS)."""
     if not listed:
         return False
-    days = NICHE_MAX_AGE_DAYS if NICHE_PATTERN.search(title.lower()) else MAX_AGE_DAYS
-    return listed < datetime.now(timezone.utc) - timedelta(days=days + 1)
+    return listed < datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS + 1)
 
 
 def _ph_eligible(countries: list[str], strict: bool = False) -> bool:
@@ -3077,7 +3073,6 @@ def deduplicate(jobs: list[dict]) -> list[dict]:
 
 def filter_jobs(jobs: list[dict]) -> list[dict]:
     cutoff = datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS)
-    niche_cutoff = datetime.now(timezone.utc) - timedelta(days=NICHE_MAX_AGE_DAYS)
     filtered = []
     for j in jobs:
         if is_excluded(j["title"], j["description"], j.get("location", "")):
@@ -3087,10 +3082,8 @@ def filter_jobs(jobs: list[dict]) -> list[dict]:
         if j["date"] and j["date"].tzinfo is None:
             j["date"] = j["date"].replace(tzinfo=timezone.utc)
         if j["date"]:
-            # company careers pages only list open roles, so they get the longer window, but a post still
-            # open after that is usually an evergreen ad or a role nobody fills
-            longer = j.get("careers_page") or NICHE_PATTERN.search(f"{j['title']} {j['description']}".lower())
-            if j["date"] < (niche_cutoff if longer else cutoff):
+            # hard cap: drop anything posted more than MAX_AGE_DAYS ago, every source alike
+            if j["date"] < cutoff:
                 continue
         j["_score"] = relevance_score(j["title"], j["description"], j.get("location", ""))
         j["_prob"] = acceptance_probability(j["title"], j["description"], j.get("location", ""), j.get("tags"))
@@ -3118,18 +3111,13 @@ PT_KEYWORDS = [
 ]
 
 
-def _is_flex_or_pt(j: dict) -> bool:
-    text = f"{j.get('title','')} {j.get('description','')} {j.get('salary','')} {' '.join(j.get('tags',[]))}".lower()
-    return any(k in text for k in FLEX_KEYWORDS + PT_KEYWORDS)
-
-
 def sort_jobs(jobs: list[dict]) -> list[dict]:
+    # default sort: freshness of the posting (newest first); undated postings sort last
     def sort_key(j):
-        flex = 1 if _is_flex_or_pt(j) else 0
         dt = j.get("date")
         if dt is None:
-            return (flex, 0, datetime.min.replace(tzinfo=timezone.utc), j.get("_score", 0))
-        return (flex, 1, dt, j.get("_score", 0))
+            return (0, datetime.min.replace(tzinfo=timezone.utc), j.get("_score", 0))
+        return (1, dt, j.get("_score", 0))
     return sorted(jobs, key=sort_key, reverse=True)
 
 
@@ -3239,10 +3227,8 @@ def _render_row(j: dict, new_ids: set[str]) -> str:
 
 def render_html(jobs: list[dict], new_ids: set[str], stats: dict) -> str:
     today = datetime.now().strftime("%A, %B %d, %Y")
-    rows = [_render_row(j, new_ids) for j in jobs if not j.get("_entry") and not j.get("_high_pay")]
-    high_jobs = sorted((j for j in jobs if j.get("_high_pay") and not j.get("_entry")), key=lambda j: j["_pay_usd"], reverse=True)
-    high_rows = [_render_row(j, new_ids) for j in high_jobs]
-    entry_rows = [_render_row(j, new_ids) for j in jobs if j.get("_entry")]
+    # one standard list, in the order sort_jobs produced (freshest posting first)
+    rows = [_render_row(j, new_ids) for j in jobs]
 
     source_summary = ", ".join(
         f"{name}: {count}" for name, count in sorted(stats["per_source"].items())
@@ -3502,15 +3488,10 @@ tr.hidden-row, .sec-hidden {{ display: none; }}
     </div>
     <button id="clearFilters" class="chip clear">Clear all</button>
 </div>
-<h2 class="section-title">True entry-level: tax, legal &amp; analyst <span class="section-count">{len(entry_rows)}</span></h2>
-<div class="section-note">Remote roles whose full posting asks for no prior experience. Each row says why it qualified.</div>
-{"<table class='entry-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(entry_rows) + "</tbody></table>" if entry_rows else '<div class="empty small">No genuine entry-level tax, legal or analyst jobs today.</div>'}
-<h2 class="section-title">High pay: ${HIGH_PAY_MIN_USD:,}+ a month <span class="section-count">{len(high_rows)}</span></h2>
-<div class="section-note">Remote roles you can apply to from the Philippines whose stated pay can reach ${HIGH_PAY_MIN_USD:,} a month, highest first. Hourly rates assume full-time unless the posting gives weekly hours.</div>
-{"<table class='high-table'><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(high_rows) + "</tbody></table>" if high_rows else '<div class="empty small">No jobs with stated pay at this level today.</div>'}
-<h2 class="section-title">All other jobs <span class="section-count">{len(rows)}</span></h2>
+<h2 class="section-title">Jobs <span class="section-count">{len(rows)}</span></h2>
+<div class="section-note">All matching remote roles posted in the last {MAX_AGE_DAYS} days, freshest first. Use the search box and filters above to narrow the list.</div>
 {"<table><thead><tr><th>Posted</th><th>Job</th><th>Location</th><th>Pay</th><th>Fit %</th><th>Workload</th><th>Match</th><th>Source</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>" if rows else '<div class="empty">No matching jobs found today. The scraper will check again tomorrow.</div>'}
-<div class="footer">Part-time &amp; flexible-hours jobs shown first, then by posting date (newest first). Score based on Xero, NZ/AU, part-time, bookkeeping keywords.</div>
+<div class="footer">Sorted by posting date, newest first. Jobs older than {MAX_AGE_DAYS} days are not shown. Score based on Xero, NZ/AU, part-time, bookkeeping keywords.</div>
 <script>
 (function () {{
     var input = document.getElementById('jobSearch');
